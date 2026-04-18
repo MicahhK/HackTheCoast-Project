@@ -34,6 +34,9 @@ from pop_trend_intelligence.paths import CACHE_DIR, GT_CACHE_FILE
 
 CACHE_FILE         = GT_CACHE_FILE
 CACHE_MAX_AGE_HOURS = 24
+GT_BASELINE_FLOOR   = 5.0
+GT_CONFIDENCE_MEAN  = 20.0
+GT_MAX_GROWTH_PCT   = 200
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +61,49 @@ TRADE_RSS_FEEDS = {
     "New Hope Network": "https://www.newhope.com/rss.xml",
     "SPINS Insights":   "https://www.spins.com/feed/",
 }
+
+
+def compute_trend_growth_metrics(series) -> dict[str, float]:
+    """
+    Compute a spike-resistant growth score from a Google Trends series.
+
+    The model emphasizes sustained movement over one-off bursts:
+      - median baseline instead of mean baseline
+      - persistence bonus for multiple elevated recent weeks
+      - low-volume confidence penalty for tiny search terms
+    """
+    recent = series.iloc[-4:]
+    older = series.iloc[-16:-4]
+
+    if recent.empty or older.empty:
+        return {
+            "growth_pct": 0,
+            "raw_growth_pct": 0.0,
+            "baseline_median": 0.0,
+            "recent_median": 0.0,
+            "persistence_ratio": 0.0,
+            "volume_confidence": 0.0,
+        }
+
+    baseline_median = float(older.median())
+    recent_median = float(recent.median())
+    baseline_for_growth = max(baseline_median, GT_BASELINE_FLOOR)
+    raw_growth_pct = ((recent_median - baseline_for_growth) / baseline_for_growth) * 100
+
+    persistence_ratio = float((recent > baseline_for_growth).sum()) / len(recent)
+    volume_confidence = min(float(series.mean()) / GT_CONFIDENCE_MEAN, 1.0)
+
+    robust_growth_pct = raw_growth_pct * persistence_ratio * volume_confidence
+    clamped_growth_pct = int(max(min(round(robust_growth_pct), GT_MAX_GROWTH_PCT), -100))
+
+    return {
+        "growth_pct": clamped_growth_pct,
+        "raw_growth_pct": round(raw_growth_pct, 1),
+        "baseline_median": round(baseline_median, 1),
+        "recent_median": round(recent_median, 1),
+        "persistence_ratio": round(persistence_ratio, 2),
+        "volume_confidence": round(volume_confidence, 2),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +182,8 @@ class GoogleTrendsCollector(BaseCollector):
                         if term not in interest_df.columns:
                             continue
                         series = interest_df[term]
-                        recent = series.iloc[-4:]
-                        older  = series.iloc[-16:-4]
-                        growth_pct = (
-                            int(((recent.mean() - older.mean()) / older.mean()) * 100)
-                            if older.mean() > 0 else 0
-                        )
+                        growth_metrics = compute_trend_growth_metrics(series)
+                        growth_pct = growth_metrics["growth_pct"]
                         if series.mean() > 0:
                             signals.append({
                                 "source":       "google_trends",
@@ -149,13 +191,20 @@ class GoogleTrendsCollector(BaseCollector):
                                 "signal_value": growth_pct,
                                 "snippet": (
                                     f"Google Trends: '{term}' avg interest={series.mean():.1f}/100, "
-                                    f"growth {growth_pct:+d}% (last 4 wks vs prior 12)"
+                                    f"robust growth {growth_pct:+d}% "
+                                    f"(median uplift {growth_metrics['raw_growth_pct']:+.1f}%, "
+                                    f"persistence {growth_metrics['persistence_ratio']:.2f})"
                                 ),
                                 "timestamp": datetime.now().isoformat(),
                                 "metadata": {
                                     "timeframe":   self.timeframe,
                                     "query_type":  "interest_over_time",
                                     "avg_interest": round(float(series.mean()), 1),
+                                    "raw_growth_pct": growth_metrics["raw_growth_pct"],
+                                    "baseline_median": growth_metrics["baseline_median"],
+                                    "recent_median": growth_metrics["recent_median"],
+                                    "persistence_ratio": growth_metrics["persistence_ratio"],
+                                    "volume_confidence": growth_metrics["volume_confidence"],
                                 },
                             })
 
