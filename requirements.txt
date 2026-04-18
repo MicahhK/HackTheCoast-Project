@@ -1,0 +1,9 @@
+streamlit>=1.30.0
+pandas>=2.0.0
+
+# Stage 1 — data collection
+pytrends>=4.9.2        # Google Trends (no API key)
+praw>=7.7.0            # Reddit API (free credentials at reddit.com/prefs/apps)
+feedparser>=6.0.11     # RSS trade publications (no API key)
+requests>=2.31.0       # Amazon + FDA scraping
+beautifulsoup4>=4.12.0 # HTML parsing for Amazon + FDA
