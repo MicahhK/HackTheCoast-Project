@@ -11,13 +11,16 @@ source venv/bin/activate        # macOS/Linux
 venv\Scripts\activate           # Windows
 
 # Verify all sources are working
-python debug_collectors.py
+python scripts/debug_collectors.py
 
 # Run Stage 1 (collect raw signals)
-python collectors.py
+python -m pop_trend_intelligence.pipeline.collectors
 
 # Run Stage 1 + Stage 2 (collect + normalize into trends)
-python core_discovery.py
+python -m pop_trend_intelligence.pipeline.discovery
+
+# Run the full pipeline and export a CSV
+python main.py
 ```
 
 **First time setup** (if venv doesn't exist):
@@ -33,15 +36,15 @@ pip install "urllib3<2.0.0"   # required — pytrends breaks with urllib3 >= 2.0
 ## Pipeline Overview
 
 ```
-Stage 1              Stage 2                Stage 3
-collectors.py  →  core_discovery.py  →  scoring.py  →  app.py (UI)
-                        ↑
-                  pop_data.py (catalog, FDA list, country risk)
+Stage 1                         Stage 2                          Stage 3
+pipeline/collectors.py  →  pipeline/discovery.py  →  pipeline/scoring.py  →  app.py (UI)
+                                       ↑
+                                 data/pop_data.py
 ```
 
 ---
 
-## Stage 1 — Data Collection (`collectors.py`)
+## Stage 1 — Data Collection (`pop_trend_intelligence/pipeline/collectors.py`)
 
 Pulls raw signals from five public sources. Each signal has the same schema:
 
@@ -94,7 +97,7 @@ Pulls raw signals from five public sources. Each signal has the same schema:
 
 ### Step 1 — Signal Normalization (Stage 2)
 
-`core_discovery.py` scans every signal's `term` and `snippet` against an ingredient catalog of ~20 trend candidates. Each catalog entry defines:
+`pop_trend_intelligence/pipeline/discovery.py` scans every signal's `term` and `snippet` against an ingredient catalog of ~20 trend candidates. Each catalog entry defines:
 
 - **Canonical name** (e.g., "Lion's Mane Mushroom")
 - **Aliases** to match in raw text (e.g., "lions mane", "hericium", "lion's mane coffee")
@@ -201,9 +204,9 @@ Reishi Mushroom Tea       0.0  peaking   — PASS       ❌  China trade risk 0.
 
 ## Google Trends Cache
 
-Google Trends is rate-limited. Results are cached for 24 hours in `gt_cache.json`.
+Google Trends is rate-limited. Results are cached for 24 hours in `artifacts/cache/gt_cache.json`.
 
-- Delete `gt_cache.json` to force a fresh fetch (triggers rate-limit delays of ~2s/batch)
+- Delete `artifacts/cache/gt_cache.json` to force a fresh fetch (triggers rate-limit delays of ~2s/batch)
 - Cache is automatically refreshed if older than 24 hours
 
 ---

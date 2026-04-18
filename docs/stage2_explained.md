@@ -1,4 +1,4 @@
-# Stage 2 Explained — How Trend Normalization Works micahhhhh ily 
+# Stage 2 Explained — How Trend Normalization Works micahhhhh ily lol
 
 This document explains what `core_discovery.py` actually does in plain terms, why each decision was made, and what the output numbers mean.
 

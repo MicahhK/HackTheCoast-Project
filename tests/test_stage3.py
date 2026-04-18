@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import tempfile
 import pandas as pd
 
-from scoring import (
+from pop_trend_intelligence.pipeline.scoring import (
     check_shelf_life,
     check_fda_ingredients,
     check_trade_risk,
@@ -22,7 +22,7 @@ from scoring import (
     score,
     export_to_csv,
 )
-from pop_data import (
+from pop_trend_intelligence.data.pop_data import (
     SHELF_LIFE_MIN_MONTHS,
     COUNTRY_RISK_THRESHOLD,
     POP_LINES,
