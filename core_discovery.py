@@ -235,18 +235,21 @@ def extract_mentions(signals):
 
 def compute_growth_rate(signals):
     """
-    Best growth rate across matched signals.
-    Google Trends values = search % growth. Amazon values = rank positions jumped.
+    Growth rate from interest_over_time signals only (the seed term's real trajectory).
+    Falls back to Amazon rank-jump if no GT interest_over_time data.
+    Rising-related queries are intentionally excluded here — they inflate the number
+    and are accounted for separately via rising_query_count.
     """
-    gt = [s["signal_value"] for s in signals
-          if s["source"] == "google_trends" and s["signal_value"] > 0]
+    iot = [s["signal_value"] for s in signals
+           if s["source"] == "google_trends"
+           and s["metadata"].get("query_type") == "interest_over_time"]
     amazon = [s["signal_value"] for s in signals
               if s["source"] == "amazon_movers" and s["signal_value"] > 0]
 
-    if gt:
-        return max(gt)
+    if iot:
+        return max(iot)  # best seed-term growth across batches
     if amazon:
-        # Rank jump of 50 positions ~ 100% growth; cap at 200
+        # Rough conversion: rank jump of 50 positions ≈ 100% demand growth; cap at 200
         return min(max(amazon) * 2, 200)
     return 0
 
@@ -257,18 +260,61 @@ def compute_growth_rate(signals):
 
 def compute_recency_score(signals):
     """
-    How early is this trend? Based on Google Trends growth direction.
-    Positive growth = window still open (higher score).
-    Negative growth = trend declining (lower score).
-    """
-    gt = [s for s in signals if s["source"] == "google_trends"]
-    if not gt:
-        return 0.5  # unknown — neutral
+    Uses interest_over_time signals only — these measure whether the seed term
+    itself is still climbing. Rising-related queries tell us about sub-term
+    velocity but not whether the window is still open on the parent trend.
 
-    avg_growth = sum(s["signal_value"] for s in gt) / len(gt)
-    # Map: +200 -> 1.0, 0 -> 0.5, -100 -> 0.17
+    Mapping: +100% growth -> ~0.67, +200% -> 1.0, flat -> 0.5, -100% -> 0.0
+    """
+    iot = [s for s in signals
+           if s["source"] == "google_trends"
+           and s["metadata"].get("query_type") == "interest_over_time"]
+    if not iot:
+        return 0.5  # no GT data — neutral
+
+    avg_growth = sum(s["signal_value"] for s in iot) / len(iot)
     score = (avg_growth + 100) / 300
     return max(0.0, min(1.0, round(score, 2)))
+
+
+# ---------------------------------------------------------------------------
+# STEP 3b — Count breakout rising-related queries
+# ---------------------------------------------------------------------------
+
+def count_rising_queries(signals):
+    """
+    Number of rising-related Google Trends queries for this trend.
+    Each one is a sub-term (e.g. 'elderberry gummies') with accelerating search volume.
+    High count = trend is spawning sub-categories = still early.
+    """
+    return sum(
+        1 for s in signals
+        if s["source"] == "google_trends"
+        and s["metadata"].get("query_type") == "rising_related"
+    )
+
+
+# ---------------------------------------------------------------------------
+# STEP 3c — Average absolute GT interest (0–100 scale)
+# ---------------------------------------------------------------------------
+
+def compute_avg_interest(signals):
+    """
+    Average absolute search interest from Google Trends interest_over_time (0–100).
+    Distinguishes a declining category leader (high interest, negative growth)
+    from a true niche (low interest, positive growth).
+    Returns None if no GT interest_over_time data.
+    """
+    values = [
+        s["metadata"]["avg_interest"]
+        for s in signals
+        if s["source"] == "google_trends"
+        and s["metadata"].get("query_type") == "interest_over_time"
+        and "avg_interest" in s["metadata"]
+    ]
+    if not values:
+        return None
+    return round(sum(values) / len(values), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +324,8 @@ def compute_recency_score(signals):
 def compute_competition_density(signals):
     """
     How crowded is the shelf?
-    Amazon rank 1-5 = very crowded. Rank 25-30 = less crowded.
-    No Amazon signal = assume moderate (0.5).
+    Based on Amazon Movers rank: low rank number = product already dominant = crowded.
+    No Amazon signal = assume moderate competition (0.5).
     """
     amazon = [s for s in signals if s["source"] == "amazon_movers"]
     if not amazon:
@@ -287,8 +333,9 @@ def compute_competition_density(signals):
 
     ranks = [s["metadata"].get("rank", 15) for s in amazon]
     avg_rank = sum(ranks) / len(ranks)
-    # Rank 1 -> 0.95 crowded, rank 30 -> 0.05 crowded
-    density = 1.0 - (avg_rank / 30)
+    # We scrape top 20 per category — normalize against that range
+    # Rank 1 -> ~0.95 (saturated), rank 20 -> ~0.05 (wide open)
+    density = 1.0 - ((avg_rank - 1) / 19)
     return max(0.05, min(0.95, round(density, 2)))
 
 
@@ -323,21 +370,23 @@ def normalize(signals):
 
         trend = {
             # Identity
-            "name":                  item["name"],
-            "category":              item["category"],
-            "format":                item["format"],
-            "key_ingredients":       item["key_ingredients"],
-            "ingredients":           item["ingredients"],
+            "name":                   item["name"],
+            "category":               item["category"],
+            "format":                 item["format"],
+            "key_ingredients":        item["key_ingredients"],
+            "ingredients":            item["ingredients"],
             "primary_source_country": item["primary_source_country"],
             # Computed signals
-            "growth_rate_pct":       compute_growth_rate(matched),
-            "recency_score":         compute_recency_score(matched),
-            "competition_density":   compute_competition_density(matched),
+            "growth_rate_pct":        compute_growth_rate(matched),
+            "recency_score":          compute_recency_score(matched),
+            "competition_density":    compute_competition_density(matched),
+            "avg_gt_interest":        compute_avg_interest(matched),   # absolute GT interest 0–100
+            "rising_query_count":     count_rising_queries(matched),   # breakout sub-term count
             # Evidence
-            "evidence":              evidence,
-            "sources":               sources,
-            "source_count":          source_count,
-            "signal_count":          len(matched),
+            "evidence":               evidence,
+            "sources":                sources,
+            "source_count":           source_count,
+            "signal_count":           len(matched),
         }
         trends.append(trend)
 
@@ -359,14 +408,25 @@ if __name__ == "__main__":
     print(f"\nRunning Stage 2 normalization on {len(signals)} signals...\n")
     trends = normalize(signals)
 
+    SOURCE_ABBREV = {
+        "google_trends": "GT",
+        "amazon_movers": "AMZ",
+        "rss":           "RSS",
+        "reddit":        "RED",
+        "fda_gras":      "FDA",
+    }
+
     print(f"{len(trends)} trends identified\n")
-    print(f"{'Trend':<30} {'Sources':>7} {'Growth':>7} {'Recency':>8} {'Competition':>12}")
-    print("-" * 70)
+    print(f"{'Trend':<28} {'Src':>8} {'Growth':>7} {'Recency':>8} {'Compete':>8} {'GT Int':>7} {'Rising':>7}")
+    print("-" * 80)
     for t in trends:
-        src_str = ",".join(s.replace("google_trends","GT").replace("amazon_movers","AMZ").replace("rss","RSS") for s in t["sources"])
+        src_str = ",".join(SOURCE_ABBREV.get(s, s) for s in sorted(t["sources"]))
+        interest = f"{t['avg_gt_interest']:.0f}" if t["avg_gt_interest"] is not None else "—"
         print(
-            f"{t['name']:<30} {src_str:>7} "
+            f"{t['name']:<28} {src_str:>8} "
             f"{t['growth_rate_pct']:>6}% "
             f"{t['recency_score']:>8.2f} "
-            f"{t['competition_density']:>12.2f}"
+            f"{t['competition_density']:>8.2f} "
+            f"{interest:>7} "
+            f"{t['rising_query_count']:>7}"
         )

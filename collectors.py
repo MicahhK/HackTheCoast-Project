@@ -74,10 +74,9 @@ FOOD_WELLNESS_SUBREDDITS = [
 ]
 
 TRADE_RSS_FEEDS = {
-    "Food Dive":               "https://www.fooddive.com/feeds/news/",
-    "Natural Products Insider": "https://www.naturalproductsinsider.com/rss/all",
-    "Nutritional Outlook":     "https://www.nutritionaloutlook.com/rss/news",
-    "Food Navigator USA":      "https://www.foodnavigator-usa.com/rss/feed.rss",
+    "Food Dive":       "https://www.fooddive.com/feeds/news/",
+    "New Hope Network": "https://www.newhope.com/rss.xml",
+    "SPINS Insights":  "https://www.spins.com/feed/",
 }
 
 
@@ -354,41 +353,44 @@ def collect_amazon_movers(days_back=None):  # noqa: ARG001  (param reserved for 
                 print(f"[collectors/amazon] HTTP {resp.status_code} for '{category_name}'")
                 continue
 
+            import re
             soup  = BeautifulSoup(resp.text, "html.parser")
-            items = soup.select(".a-ordered-list .a-list-item")[:20]
+            items = soup.find_all("div", attrs={"data-asin": True})[:20]
 
             if not items:
-                print(f"[collectors/amazon] No items found for '{category_name}' — selectors may be stale.")
+                print(f"[collectors/amazon] No items found for '{category_name}' — page structure may have changed.")
                 continue
 
             for item in items:
-                # Skip downward movers — only care about rising products
-                arrow = item.select_one("img.zg-grid-arrow")
-                if arrow and "down" in arrow.get("alt", "").lower():
-                    continue
+                # Rank badge e.g. "#1"
+                rank_el  = item.find(class_=re.compile(r"zg-bdg-text"))
+                rank_now = int(rank_el.get_text(strip=True).replace("#", "")) if rank_el else 0
 
-                # Product name from image alt text
-                img = item.select_one("img.p13n-product-image")
-                if not img:
-                    continue
-                name = img.get("alt", "").strip()
+                # Product title from the first substantial anchor text
+                name = ""
+                for a in item.find_all("a", href=re.compile(r"/dp/")):
+                    t = a.get_text(strip=True)
+                    if len(t) > 20 and not t.startswith("$"):
+                        name = t[:80]
+                        break
                 if not name:
                     continue
 
-                # Rank change from metadata text e.g. "Sales rank: 5 (was 80)"
-                meta_el  = item.select_one("._cDEzb_zg-grid-rank-metadata_33jPv")
-                meta_txt = meta_el.get_text(" ", strip=True) if meta_el else ""
-                rank_el  = item.select_one(".zg-bdg-text")
-                rank_now = int(rank_el.get_text(strip=True).replace("#", "")) if rank_el else 0
+                # Rank-change line e.g. "Sales rank: 163 (previously unranked)" / "was 44,420"
+                full_text = item.get_text(separator=" ", strip=True)
+                rank_info = re.search(r"Sales rank: \d[\d,]* \([^)]+\)", full_text)
+                meta_txt  = rank_info.group(0) if rank_info else ""
 
-                # Parse signal value: positions jumped, or 999 for brand-new entries
-                import re
-                was_match = re.search(r"was\s+(\d+)", meta_txt)
+                # Skip downward movers
+                if re.search(r"\bdown\b", full_text, re.IGNORECASE) and not meta_txt:
+                    continue
+
+                was_match = re.search(r"was\s+([\d,]+)", meta_txt)
                 if was_match:
-                    rank_before = int(was_match.group(1))
-                    signal_val  = rank_before - rank_now  # bigger jump = higher value
+                    rank_before = int(was_match.group(1).replace(",", ""))
+                    signal_val  = rank_before - rank_now
                 elif "previously unranked" in meta_txt.lower():
-                    signal_val = 999  # brand new — maximum signal
+                    signal_val = 999
                 else:
                     signal_val = 0
 
@@ -463,16 +465,19 @@ def collect_fda_gras(days_back=365):
 
         for row in rows[:60]:  # scan last 60 notices
             cols = row.select("td")
-            if len(cols) < 4:
+            if len(cols) < 3:
                 continue
 
             substance = cols[1].get_text(strip=True)
-            date_str  = cols[3].get_text(strip=True)
+            if not substance:
+                continue
+            date_str  = cols[2].get_text(strip=True)  # "Date of closure" column
 
             try:
                 notice_date = datetime.strptime(date_str, "%m/%d/%Y")
             except ValueError:
-                continue
+                # Pending notices have no closure date yet — use today as proxy
+                notice_date = datetime.now()
 
             if notice_date < cutoff:
                 continue
@@ -513,7 +518,7 @@ def collect_all():
         ("Reddit",          collect_reddit),
         ("RSS / Trade",     collect_rss),
         ("Amazon Movers",   collect_amazon_movers),
-        # FDA GRAS endpoint currently unavailable — re-enable when URL is confirmed
+        ("FDA GRAS",        collect_fda_gras),
     ]
 
     for label, fn in sources:

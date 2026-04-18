@@ -80,9 +80,9 @@ print("=" * 60)
 try:
     import feedparser
     feeds = {
-        "Food Navigator USA": "https://www.foodnavigator-usa.com/rss/feed.rss",
-        "New Hope Network":   "https://www.newhope.com/rss.xml",
-        "Nutritional Outlook": "https://www.nutritionaloutlook.com/rss/news",
+        "Food Dive":        "https://www.fooddive.com/feeds/news/",
+        "New Hope Network": "https://www.newhope.com/rss.xml",
+        "SPINS Insights":   "https://www.spins.com/feed/",
     }
     for name, url in feeds.items():
         try:
@@ -118,13 +118,22 @@ try:
     print(f"  HTTP status: {resp.status_code}")
     if resp.status_code == 200:
         soup  = BeautifulSoup(resp.text, "html.parser")
-        items = soup.select(".zg-item-immersion")
-        print(f"  Found {len(items)} items with selector '.zg-item-immersion'")
-        if not items:
-            # Try alternate selectors
-            alt = soup.select(".p13n-desktop-grid")
-            print(f"  Alt selector '.p13n-desktop-grid': {len(alt)} items")
-            print("  Amazon may have changed their layout or is blocking the request.")
+        items = soup.find_all("div", attrs={"data-asin": True})
+        print(f"  Found {len(items)} product items (data-asin elements)")
+        if items:
+            import re
+            for item in items[:3]:
+                rank_el = item.find(class_=re.compile(r"zg-bdg-text"))
+                rank = rank_el.get_text(strip=True) if rank_el else "?"
+                name = ""
+                for a in item.find_all("a", href=re.compile(r"/dp/")):
+                    t = a.get_text(strip=True)
+                    if len(t) > 20 and not t.startswith("$"):
+                        name = t[:60]
+                        break
+                print(f"    {rank} — {name}")
+        else:
+            print("  Amazon may be blocking the request (captcha/rate limit).")
     else:
         print("  Amazon is blocking the request (rate limit / captcha).")
 except Exception as e:
@@ -138,7 +147,7 @@ try:
     import requests
     from bs4 import BeautifulSoup
     resp = requests.get(
-        "https://www.accessdata.fda.gov/scripts/fdcc/"
+        "https://www.cfsanappsexternal.fda.gov/scripts/fdcc/"
         "index.cfm?set=GRASNotices&sort=GRN_No&order=DESC&startrow=1&type=basic&search=",
         timeout=20,
         headers={"User-Agent": "POP_TrendIntelligence/1.0 (debug)"},
