@@ -166,6 +166,27 @@ Products established in SE Asia but unknown in the U.S. show up in our data as:
 
 These are the highest-value DEVELOP candidates because POP already has authentic supply chain relationships that U.S. competitors don't.
 
+### The Negative Growth / Rising Queries Signal
+
+Some of the most actionable opportunities show **negative base growth but high rising query counts** — for example, Ginger Shot (-6% base growth, 4 rising sub-queries including "organic ginger shot" +130%) and Lion's Mane Mushroom (-5% base, rising queries like "lions mane supplement" +400%).
+
+This pattern means: the broad trend is maturing, but specific variants and use cases are still early. For POP — who already makes Ginger Chews and Ginger Honey Crystals — a premium organic ginger shot format is a natural DEVELOP extension into a sub-category that's just opening, with no new supply chain required. The base market is proven; the variant window is still wide open.
+
+### Live Output (April 2026)
+
+```
+Trend                   Score  Stage     Action       Compliance
+────────────────────────────────────────────────────────────────────
+Matcha Mushroom Latte    41.0  growing   🌟 BOTH       ✅  Matches POP Herbal Teas + Organic Teas
+Mushroom Coffee          40.5  growing   🌟 BOTH       ✅  "mushroom coffee benefits" rising +3250%
+Turmeric Ginger Latte    40.3  growing   🌟 BOTH       ✅  Direct adjacency to Ginger Chews line
+Ginger Shot              40.0  peaking   🔨 DEVELOP    ✅  4 rising sub-queries despite -6% base
+Lion's Mane Mushroom     39.5  peaking   🔨 DEVELOP    ✅  "lions mane supplement" rising +400%
+Manuka Honey             38.8  growing   🌟 BOTH       ✅  New Zealand sourcing, low risk
+Tempeh                    0.0  growing   — PASS       ❌  9mo shelf life < 12mo minimum
+Reishi Mushroom Tea       0.0  peaking   — PASS       ❌  China trade risk 0.85, no exemption
+```
+
 ---
 
 ## Hard Constraints (Non-Negotiable)
@@ -186,22 +207,3 @@ Google Trends is rate-limited. Results are cached for 24 hours in `gt_cache.json
 - Cache is automatically refreshed if older than 24 hours
 
 ---
-
-## Project Status
-
-| File | Stage | Status | Docs |
-|---|---|---|---|
-| `collectors.py` | 1 — Data Collection | ✅ Done | [stage1_collectors.md](docs/stage1_collectors.md) |
-| `core_discovery.py` | 2 — Normalization | ✅ Done | [stage2_core_discovery.md](docs/stage2_core_discovery.md) · [stage2_explained.md](docs/stage2_explained.md) |
-| `pop_data.py` | Reference data | ✅ Done | — |
-| `scoring.py` | 3 — Scoring | ✅ Done | [stage3_scoring.md](docs/stage3_scoring.md) · [stage3_explained.md](docs/stage3_explained.md) |
-| `app.py` | UI | ⬜ Not built | — |
-
-### Tests
-
-```bash
-source venv/bin/activate
-pytest tests/test_stage2.py -v   # 45 tests — Stage 2 unit + integration
-pytest tests/test_stage3.py -v   # 82 tests — Stage 3 unit + integration
-pytest tests/ -v                  # 127 tests — full pipeline
-```

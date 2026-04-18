@@ -1,7 +1,7 @@
 """
 Stage 3 — Scoring & Ranking (scoring.py)
 
-Takes normalized trend objects from core_discovery.normalize() and:
+Takes normalized trend objects from core_discovery.TrendNormalizer.normalize() and:
   1. Applies POP's hard constraints (shelf life, FDA ingredients, country trade risk)
   2. Computes signal strength score (0–100) from Stage 2 metrics
   3. Computes POP-Fit score (0–100) from adjacency to POP's product lines
@@ -37,330 +37,299 @@ from pop_data import (
 
 
 # ---------------------------------------------------------------------------
-# COMPLIANCE CHECK 1 — Shelf Life
+# TREND SCORER
 # ---------------------------------------------------------------------------
 
-def check_shelf_life(trend):
+class TrendScorer:
     """
-    Returns (ok: bool, months: int, note: str).
-    Looks up the trend's format in SHELF_LIFE_TABLE.
-    Unknown formats default to 12 months (borderline — flagged for review).
+    Stage 3 scoring engine. Groups all compliance checks, metric computations,
+    action classification, and export into one cohesive class.
     """
-    fmt    = trend.get("format", "").lower()
-    months = SHELF_LIFE_TABLE.get(fmt)
 
-    if months is None:
-        return True, 12, f"Unknown format '{fmt}' — assumed 12mo (review required)"
+    # -- Compliance checks --
 
-    ok   = months >= SHELF_LIFE_MIN_MONTHS
-    note = (f"Shelf life {months}mo ✅" if ok
-            else f"Shelf life {months}mo < {SHELF_LIFE_MIN_MONTHS}mo minimum ❌")
-    return ok, months, note
+    def check_shelf_life(self, trend: dict) -> tuple[bool, int, str]:
+        """
+        Returns (ok, months, note).
+        Unknown formats default to 12 months (borderline — flagged for review).
+        """
+        fmt    = trend.get("format", "").lower()
+        months = SHELF_LIFE_TABLE.get(fmt)
 
+        if months is None:
+            return True, 12, f"Unknown format '{fmt}' — assumed 12mo (review required)"
 
-# ---------------------------------------------------------------------------
-# COMPLIANCE CHECK 2 — FDA Ingredients
-# ---------------------------------------------------------------------------
+        ok   = months >= SHELF_LIFE_MIN_MONTHS
+        note = (f"Shelf life {months}mo ✅" if ok
+                else f"Shelf life {months}mo < {SHELF_LIFE_MIN_MONTHS}mo minimum ❌")
+        return ok, months, note
 
-def check_fda_ingredients(trend):
-    """
-    Returns (blocked: bool, watch_list: list[str], note: str).
-    Scans trend["ingredients"] against FDA_STATUS.
-    Banned/restricted -> blocked. Watch-list -> flagged, not blocked.
-    """
-    ingredients = [i.lower() for i in trend.get("ingredients", [])]
-    blocked_by  = []
-    watch_hits  = []
+    def check_fda_ingredients(self, trend: dict) -> tuple[bool, list, str]:
+        """
+        Returns (blocked, watch_list, note).
+        Banned/restricted -> blocked. Watch-list -> flagged, not blocked.
+        """
+        ingredients = [i.lower() for i in trend.get("ingredients", [])]
+        blocked_by  = []
+        watch_hits  = []
 
-    for ing in ingredients:
-        for flagged, status in FDA_STATUS.items():
-            if flagged in ing:
-                if status in FDA_BLOCK_STATUSES:
-                    blocked_by.append(flagged)
-                else:
-                    watch_hits.append(flagged)
+        for ing in ingredients:
+            for flagged, status in FDA_STATUS.items():
+                if flagged in ing:
+                    if status in FDA_BLOCK_STATUSES:
+                        blocked_by.append(flagged)
+                    else:
+                        watch_hits.append(flagged)
 
-    blocked_by = list(set(blocked_by))
-    watch_hits = list(set(watch_hits))
+        blocked_by = list(set(blocked_by))
+        watch_hits = list(set(watch_hits))
 
-    if blocked_by:
-        note = f"FDA blocked: {', '.join(sorted(blocked_by))} ❌"
-    elif watch_hits:
-        note = f"FDA watch: {', '.join(sorted(watch_hits))} ⚠️"
-    else:
-        note = "FDA clear ✅"
+        if blocked_by:
+            note = f"FDA blocked: {', '.join(sorted(blocked_by))} ❌"
+        elif watch_hits:
+            note = f"FDA watch: {', '.join(sorted(watch_hits))} ⚠️"
+        else:
+            note = "FDA clear ✅"
 
-    return bool(blocked_by), watch_hits, note
+        return bool(blocked_by), watch_hits, note
 
+    def check_trade_risk(self, trend: dict) -> tuple[bool, float, str]:
+        """
+        Returns (ok, risk_score, note).
+        China exemption applies for categories with existing POP supply chains.
+        """
+        country  = trend.get("primary_source_country", "").lower()
+        category = trend.get("category", "").lower().replace(" ", "_").replace("&", "and")
+        risk     = COUNTRY_RISK.get(country, 0.30)
 
-# ---------------------------------------------------------------------------
-# COMPLIANCE CHECK 3 — Country Trade Risk
-# ---------------------------------------------------------------------------
+        if country == "china" and category in CHINA_EXEMPT_CATEGORIES:
+            return True, risk, f"China risk {risk} — exempt (existing POP supply chain) ✅"
 
-def check_trade_risk(trend):
-    """
-    Returns (ok: bool, risk_score: float, note: str).
-    China exemption applies for organic_teas category (existing POP supply chain).
-    """
-    country  = trend.get("primary_source_country", "").lower()
-    category = trend.get("category", "").lower().replace(" ", "_").replace("&", "and")
-    risk     = COUNTRY_RISK.get(country, 0.30)  # unknown country: moderate default
+        ok   = risk <= COUNTRY_RISK_THRESHOLD
+        note = (f"Trade risk {risk:.2f} ✅" if ok
+                else f"Trade risk {risk:.2f} > {COUNTRY_RISK_THRESHOLD} threshold ❌")
+        return ok, risk, note
 
-    if country == "china" and category in CHINA_EXEMPT_CATEGORIES:
-        return True, risk, f"China risk {risk} — exempt (existing POP supply chain) ✅"
+    # -- Signal strength score --
 
-    ok   = risk <= COUNTRY_RISK_THRESHOLD
-    note = (f"Trade risk {risk:.2f} ✅" if ok
-            else f"Trade risk {risk:.2f} > {COUNTRY_RISK_THRESHOLD} threshold ❌")
-    return ok, risk, note
+    def compute_signal_strength(self, trend: dict) -> float:
+        """
+        Weighted score (0–100) from six Stage 2 metrics.
 
+        Weights (SIGNAL_STRENGTH_FACTORS):
+          35% growth rate, 30% recency, 15% corroboration,
+          10% competition (inverse), 5% market size, 5% rising boost
+        """
+        growth_normalized   = min(max(trend.get("growth_rate_pct", 0), 0), MAX_GROWTH_PCT) / MAX_GROWTH_PCT
+        recency             = trend.get("recency_score", 0.5)
+        corroboration       = min(trend.get("source_count", 1), MAX_SOURCES) / MAX_SOURCES
+        competition_inverse = 1.0 - trend.get("competition_density", 0.5)
 
-# ---------------------------------------------------------------------------
-# SIGNAL STRENGTH SCORE (0–100)
-# ---------------------------------------------------------------------------
+        avg_interest_raw = trend.get("avg_gt_interest")
+        market_size      = (avg_interest_raw / 100.0) if avg_interest_raw is not None else 0.5
 
-def compute_signal_strength(trend):
-    """
-    Weighted score from Stage 2 metrics.
+        rising_count = trend.get("rising_query_count", 0)
+        rising_boost = min(rising_count, MAX_RISING_QUERIES) / MAX_RISING_QUERIES
 
-    Weights (defined in pop_data.SIGNAL_STRENGTH_FACTORS):
-      35% growth rate     — velocity: is the window still open?
-      30% recency         — timing: early vs late in the trend cycle
-      15% corroboration   — cross-source confirmation
-      10% competition     — shelf opportunity (inverse of density)
-       5% market size     — absolute GT interest: viability floor
-       5% rising boost    — breakout sub-queries: trend spawning sub-categories
-    """
-    growth_normalized   = min(max(trend.get("growth_rate_pct", 0), 0), MAX_GROWTH_PCT) / MAX_GROWTH_PCT
-    recency             = trend.get("recency_score", 0.5)
-    corroboration       = min(trend.get("source_count", 1), MAX_SOURCES) / MAX_SOURCES
-    competition_inverse = 1.0 - trend.get("competition_density", 0.5)
+        score = (
+            SIGNAL_STRENGTH_FACTORS["growth_rate"]   * growth_normalized   * 100 +
+            SIGNAL_STRENGTH_FACTORS["recency"]        * recency             * 100 +
+            SIGNAL_STRENGTH_FACTORS["corroboration"]  * corroboration       * 100 +
+            SIGNAL_STRENGTH_FACTORS["competition"]    * competition_inverse * 100 +
+            SIGNAL_STRENGTH_FACTORS["market_size"]    * market_size         * 100 +
+            SIGNAL_STRENGTH_FACTORS["rising_boost"]   * rising_boost        * 100
+        )
+        return round(score, 1)
 
-    # avg_gt_interest is 0–100; None means no GT data (default to 50 = neutral)
-    avg_interest_raw = trend.get("avg_gt_interest")
-    market_size      = (avg_interest_raw / 100.0) if avg_interest_raw is not None else 0.5
+    # -- POP-Fit score --
 
-    # rising_query_count: capped at MAX_RISING_QUERIES before normalizing
-    rising_count  = trend.get("rising_query_count", 0)
-    rising_boost  = min(rising_count, MAX_RISING_QUERIES) / MAX_RISING_QUERIES
+    def compute_pop_fit(self, trend: dict) -> tuple[int, list]:
+        """
+        Returns (score, matched_lines).
+        +30 points per POP line whose keywords overlap with trend["key_ingredients"].
+        Capped at 100.
+        """
+        key_ings      = [k.lower() for k in trend.get("key_ingredients", [])]
+        score         = 0
+        matched_lines = []
 
-    score = (
-        SIGNAL_STRENGTH_FACTORS["growth_rate"]   * growth_normalized   * 100 +
-        SIGNAL_STRENGTH_FACTORS["recency"]        * recency             * 100 +
-        SIGNAL_STRENGTH_FACTORS["corroboration"]  * corroboration       * 100 +
-        SIGNAL_STRENGTH_FACTORS["competition"]    * competition_inverse * 100 +
-        SIGNAL_STRENGTH_FACTORS["market_size"]    * market_size         * 100 +
-        SIGNAL_STRENGTH_FACTORS["rising_boost"]   * rising_boost        * 100
-    )
-    return round(score, 1)
+        for line_key, line in POP_LINES.items():
+            for kw in line["keywords"]:
+                if any(kw.lower() in ing or ing in kw.lower() for ing in key_ings):
+                    score += POP_FIT_POINTS_PER_LINE
+                    matched_lines.append(line["display_name"])
+                    break
 
+        return min(score, POP_FIT_MAX), matched_lines
 
-# ---------------------------------------------------------------------------
-# POP-FIT SCORE (0–100) + matched line names
-# ---------------------------------------------------------------------------
+    # -- Market stage --
 
-def compute_pop_fit(trend):
-    """
-    Returns (score: int, matched_lines: list[str]).
+    def compute_market_stage(self, trend: dict) -> str:
+        """
+        Derives lifecycle label from growth_rate_pct and recency_score.
+        emerging / growing / peaking / declining
+        """
+        growth  = trend.get("growth_rate_pct", 0)
+        recency = trend.get("recency_score", 0.5)
 
-    +30 points per POP proprietary line whose keywords overlap with
-    trend["key_ingredients"]. Capped at 100.
-    matched_lines contains the display names of every line that matched.
-    """
-    key_ings     = [k.lower() for k in trend.get("key_ingredients", [])]
-    score        = 0
-    matched_lines = []
+        for stage, thresholds in MARKET_STAGE_THRESHOLDS.items():
+            if growth >= thresholds["min_growth"] and recency >= thresholds["min_recency"]:
+                return stage
+        return "declining"
 
-    for line_key, line in POP_LINES.items():
-        for kw in line["keywords"]:
-            if any(kw.lower() in ing or ing in kw.lower() for ing in key_ings):
-                score += POP_FIT_POINTS_PER_LINE
-                matched_lines.append(line["display_name"])
-                break  # one match per line — no double-counting
+    # -- Action classifier --
 
-    return min(score, POP_FIT_MAX), matched_lines
+    def classify_action(self, trend: dict, pop_fit_score: int, compliance_ok: bool) -> str:
+        """
+        DEVELOP    — high POP adjacency (pop_fit >= 50), window still open
+        DISTRIBUTE — proven demand in POP's distributed categories or open shelf
+        BOTH       — qualifies for both
+        PASS       — compliance failed, weak fit, or window closed
+        """
+        if not compliance_ok:
+            return "PASS"
 
+        recency_ok = trend.get("recency_score", 0) >= 0.30
+        growth_ok  = trend.get("growth_rate_pct", 0) >= 0
 
-# ---------------------------------------------------------------------------
-# MARKET STAGE
-# ---------------------------------------------------------------------------
+        can_develop = pop_fit_score >= 50 and recency_ok
+        can_distribute = (
+            (
+                trend.get("category", "") in POP_DISTRIBUTED_CATEGORIES
+                or trend.get("competition_density", 1.0) < 0.6
+            )
+            and growth_ok
+        )
 
-def compute_market_stage(trend):
-    """
-    Derives a human-readable lifecycle label from growth_rate_pct and recency_score.
-
-      emerging  — fast growth, high recency: window is just opening
-      growing   — positive growth, healthy recency: window is open
-      peaking   — flat or slight decline, recency still acceptable
-      declining — trend is clearly past its peak
-    """
-    growth  = trend.get("growth_rate_pct", 0)
-    recency = trend.get("recency_score", 0.5)
-
-    for stage, thresholds in MARKET_STAGE_THRESHOLDS.items():
-        if growth >= thresholds["min_growth"] and recency >= thresholds["min_recency"]:
-            return stage
-    return "declining"
-
-
-# ---------------------------------------------------------------------------
-# ACTION CLASSIFIER
-# ---------------------------------------------------------------------------
-
-def classify_action(trend, pop_fit_score, compliance_ok):
-    """
-    DEVELOP    — high POP adjacency (pop_fit >= 50), window still open
-    DISTRIBUTE — proven demand in POP's distributed categories or open shelf,
-                 trend not actively declining
-    BOTH       — qualifies for both
-    PASS       — compliance failed, weak fit, or window closed
-    """
-    if not compliance_ok:
+        if can_develop and can_distribute:
+            return "BOTH"
+        if can_develop:
+            return "DEVELOP"
+        if can_distribute:
+            return "DISTRIBUTE"
         return "PASS"
 
-    recency_ok = trend.get("recency_score", 0) >= 0.30
-    growth_ok  = trend.get("growth_rate_pct", 0) >= 0
+    # -- Main scoring method --
 
-    can_develop = pop_fit_score >= 50 and recency_ok
-    can_distribute = (
-        (
-            trend.get("category", "") in POP_DISTRIBUTED_CATEGORIES
-            or trend.get("competition_density", 1.0) < 0.6
-        )
-        and growth_ok
-    )
+    def score(self, trends: list[dict]) -> list[dict]:
+        """
+        Main Stage 3 method.
+        Input:  list of normalized trend objects from TrendNormalizer.normalize()
+        Output: same list with all scoring fields added, sorted by composite_score desc
+        """
+        results = []
 
-    if can_develop and can_distribute:
-        return "BOTH"
-    if can_develop:
-        return "DEVELOP"
-    if can_distribute:
-        return "DISTRIBUTE"
-    return "PASS"
+        for trend in trends:
+            t = dict(trend)
+
+            shelf_ok,    shelf_months, shelf_note = self.check_shelf_life(t)
+            fda_blocked, fda_watch,   fda_note   = self.check_fda_ingredients(t)
+            risk_ok,     risk_score,  risk_note  = self.check_trade_risk(t)
+
+            compliance_ok   = shelf_ok and not fda_blocked and risk_ok
+            compliance_note = " | ".join([shelf_note, fda_note, risk_note])
+
+            signal_strength           = self.compute_signal_strength(t)
+            pop_fit, pop_line_matches = self.compute_pop_fit(t)
+            market_stage              = self.compute_market_stage(t)
+
+            composite = round(
+                SIGNAL_STRENGTH_WEIGHT * signal_strength + POP_FIT_WEIGHT * pop_fit, 1
+            ) if compliance_ok else 0.0
+
+            action = self.classify_action(t, pop_fit, compliance_ok)
+
+            t.update({
+                "shelf_life_months": shelf_months,
+                "shelf_life_ok":     shelf_ok,
+                "fda_blocked":       fda_blocked,
+                "fda_watch":         fda_watch,
+                "trade_risk_score":  risk_score,
+                "trade_risk_ok":     risk_ok,
+                "compliance_ok":     compliance_ok,
+                "compliance_note":   compliance_note,
+                "signal_strength":   signal_strength,
+                "pop_fit_score":     pop_fit,
+                "pop_line_matches":  pop_line_matches,
+                "market_stage":      market_stage,
+                "composite_score":   composite,
+                "action":            action,
+            })
+            results.append(t)
+
+        results.sort(key=lambda t: t["composite_score"], reverse=True)
+        return results
+
+    # -- CSV export --
+
+    def export_to_csv(self, scored_trends: list[dict], filepath: str = "pop_trend_report.csv"):
+        """
+        Flattens scored trend objects into a CSV/Excel-compatible file.
+        23 columns ordered for buyer readability.
+        """
+        import pandas as pd
+
+        COLUMNS = [
+            "action", "composite_score", "name", "category", "market_stage",
+            "growth_rate_pct", "recency_score", "competition_density",
+            "signal_strength", "pop_fit_score", "pop_line_matches",
+            "compliance_ok", "shelf_life_months", "fda_watch", "trade_risk_score",
+            "sources", "source_count", "avg_gt_interest", "rising_query_count",
+            "primary_source_country", "format", "compliance_note", "top_evidence",
+        ]
+
+        rows = []
+        for t in scored_trends:
+            top_evidence = " || ".join(
+                e["snippet"][:100] for e in t.get("evidence", [])[:3]
+            )
+            rows.append({
+                "action":               t.get("action"),
+                "composite_score":      t.get("composite_score"),
+                "name":                 t.get("name"),
+                "category":             t.get("category"),
+                "market_stage":         t.get("market_stage"),
+                "growth_rate_pct":      t.get("growth_rate_pct"),
+                "recency_score":        t.get("recency_score"),
+                "competition_density":  t.get("competition_density"),
+                "signal_strength":      t.get("signal_strength"),
+                "pop_fit_score":        t.get("pop_fit_score"),
+                "pop_line_matches":     ", ".join(t.get("pop_line_matches", [])),
+                "compliance_ok":        t.get("compliance_ok"),
+                "shelf_life_months":    t.get("shelf_life_months"),
+                "fda_watch":            ", ".join(t.get("fda_watch", [])),
+                "trade_risk_score":     t.get("trade_risk_score"),
+                "sources":              ", ".join(t.get("sources", [])),
+                "source_count":         t.get("source_count"),
+                "avg_gt_interest":      t.get("avg_gt_interest"),
+                "rising_query_count":   t.get("rising_query_count"),
+                "primary_source_country": t.get("primary_source_country"),
+                "format":               t.get("format"),
+                "compliance_note":      t.get("compliance_note"),
+                "top_evidence":         top_evidence,
+            })
+
+        df = pd.DataFrame(rows, columns=COLUMNS)
+        df.to_csv(filepath, index=False)
+        print(f"[scoring] Exported {len(df)} trends to {filepath}")
+        return df
 
 
 # ---------------------------------------------------------------------------
-# MAIN — score(trends)
+# Module-level convenience functions — preserve public API for tests + scripts
 # ---------------------------------------------------------------------------
 
-def score(trends):
-    """
-    Main Stage 3 function.
-    Input:  list of normalized trend objects from core_discovery.normalize()
-    Output: same list with all scoring fields added, sorted by composite_score desc
-    """
-    results = []
+_scorer = TrendScorer()
 
-    for trend in trends:
-        t = dict(trend)  # don't mutate the original
-
-        # --- compliance ---
-        shelf_ok,    shelf_months, shelf_note = check_shelf_life(t)
-        fda_blocked, fda_watch,   fda_note   = check_fda_ingredients(t)
-        risk_ok,     risk_score,  risk_note  = check_trade_risk(t)
-
-        compliance_ok   = shelf_ok and not fda_blocked and risk_ok
-        compliance_note = " | ".join([shelf_note, fda_note, risk_note])
-
-        # --- scores ---
-        signal_strength          = compute_signal_strength(t)
-        pop_fit, pop_line_matches = compute_pop_fit(t)
-        market_stage             = compute_market_stage(t)
-
-        composite = round(
-            SIGNAL_STRENGTH_WEIGHT * signal_strength + POP_FIT_WEIGHT * pop_fit, 1
-        ) if compliance_ok else 0.0
-
-        # --- action ---
-        action = classify_action(t, pop_fit, compliance_ok)
-
-        t.update({
-            # compliance
-            "shelf_life_months": shelf_months,
-            "shelf_life_ok":     shelf_ok,
-            "fda_blocked":       fda_blocked,
-            "fda_watch":         fda_watch,
-            "trade_risk_score":  risk_score,
-            "trade_risk_ok":     risk_ok,
-            "compliance_ok":     compliance_ok,
-            "compliance_note":   compliance_note,
-            # scores
-            "signal_strength":   signal_strength,
-            "pop_fit_score":     pop_fit,
-            "pop_line_matches":  pop_line_matches,
-            "market_stage":      market_stage,
-            "composite_score":   composite,
-            "action":            action,
-        })
-        results.append(t)
-
-    results.sort(key=lambda t: t["composite_score"], reverse=True)
-    return results
-
-
-# ---------------------------------------------------------------------------
-# CSV EXPORT
-# ---------------------------------------------------------------------------
-
-def export_to_csv(scored_trends, filepath="pop_trend_report.csv"):
-    """
-    Flattens scored trend objects into a CSV/Excel-compatible file.
-    Uses pandas (already a project dependency via streamlit).
-
-    Columns are ordered for buyer readability:
-      action, composite_score, name, category, market_stage,
-      growth_rate_pct, recency_score, competition_density,
-      signal_strength, pop_fit_score, pop_line_matches,
-      compliance_ok, shelf_life_months, fda_watch, trade_risk_score,
-      sources, source_count, avg_gt_interest, rising_query_count,
-      primary_source_country, format, compliance_note, top_evidence
-    """
-    import pandas as pd
-
-    COLUMNS = [
-        "action", "composite_score", "name", "category", "market_stage",
-        "growth_rate_pct", "recency_score", "competition_density",
-        "signal_strength", "pop_fit_score", "pop_line_matches",
-        "compliance_ok", "shelf_life_months", "fda_watch", "trade_risk_score",
-        "sources", "source_count", "avg_gt_interest", "rising_query_count",
-        "primary_source_country", "format", "compliance_note", "top_evidence",
-    ]
-
-    rows = []
-    for t in scored_trends:
-        top_evidence = " || ".join(
-            e["snippet"][:100] for e in t.get("evidence", [])[:3]
-        )
-        rows.append({
-            "action":               t.get("action"),
-            "composite_score":      t.get("composite_score"),
-            "name":                 t.get("name"),
-            "category":             t.get("category"),
-            "market_stage":         t.get("market_stage"),
-            "growth_rate_pct":      t.get("growth_rate_pct"),
-            "recency_score":        t.get("recency_score"),
-            "competition_density":  t.get("competition_density"),
-            "signal_strength":      t.get("signal_strength"),
-            "pop_fit_score":        t.get("pop_fit_score"),
-            "pop_line_matches":     ", ".join(t.get("pop_line_matches", [])),
-            "compliance_ok":        t.get("compliance_ok"),
-            "shelf_life_months":    t.get("shelf_life_months"),
-            "fda_watch":            ", ".join(t.get("fda_watch", [])),
-            "trade_risk_score":     t.get("trade_risk_score"),
-            "sources":              ", ".join(t.get("sources", [])),
-            "source_count":         t.get("source_count"),
-            "avg_gt_interest":      t.get("avg_gt_interest"),
-            "rising_query_count":   t.get("rising_query_count"),
-            "primary_source_country": t.get("primary_source_country"),
-            "format":               t.get("format"),
-            "compliance_note":      t.get("compliance_note"),
-            "top_evidence":         top_evidence,
-        })
-
-    df = pd.DataFrame(rows, columns=COLUMNS)
-    df.to_csv(filepath, index=False)
-    print(f"[scoring] Exported {len(df)} trends to {filepath}")
-    return df
+def check_shelf_life(trend):                              return _scorer.check_shelf_life(trend)
+def check_fda_ingredients(trend):                        return _scorer.check_fda_ingredients(trend)
+def check_trade_risk(trend):                             return _scorer.check_trade_risk(trend)
+def compute_signal_strength(trend):                      return _scorer.compute_signal_strength(trend)
+def compute_pop_fit(trend):                              return _scorer.compute_pop_fit(trend)
+def compute_market_stage(trend):                         return _scorer.compute_market_stage(trend)
+def classify_action(trend, pop_fit_score, compliance_ok): return _scorer.classify_action(trend, pop_fit_score, compliance_ok)
+def score(trends):                                       return _scorer.score(trends)
+def export_to_csv(scored_trends, filepath="pop_trend_report.csv"): return _scorer.export_to_csv(scored_trends, filepath)
 
 
 # ---------------------------------------------------------------------------
@@ -369,22 +338,23 @@ def export_to_csv(scored_trends, filepath="pop_trend_report.csv"):
 
 if __name__ == "__main__":
     from collectors import collect_all
-    from core_discovery import normalize
+    from core_discovery import TrendNormalizer
 
     print("Running Stage 1 + 2...")
     signals = collect_all()
-    trends  = normalize(signals)
+    trends  = TrendNormalizer().normalize(signals)
     print(f"{len(trends)} trends normalized\n")
 
     print("Running Stage 3 scoring...")
-    scored = score(trends)
+    scorer = TrendScorer()
+    scored = scorer.score(trends)
 
     ACTION_ICONS = {"BOTH": "🌟", "DEVELOP": "🔨", "DISTRIBUTE": "📦", "PASS": "—"}
 
     print(f"\n{'Trend':<28} {'Score':>6} {'Stage':<11} {'Action':<12} Compliance")
     print("─" * 100)
     for t in scored:
-        icon = ACTION_ICONS.get(t["action"], "")
+        icon   = ACTION_ICONS.get(t["action"], "")
         comply = "✅" if t["compliance_ok"] else "❌"
         print(
             f"{t['name']:<28} {t['composite_score']:>5.1f}  "
@@ -404,5 +374,4 @@ if __name__ == "__main__":
         for e in t["evidence"][:2]:
             print(f"  [{e['source']}] {e['snippet'][:85]}")
 
-    # Export CSV
-    export_to_csv(scored)
+    scorer.export_to_csv(scored)

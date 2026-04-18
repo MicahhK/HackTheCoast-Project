@@ -1,5 +1,5 @@
 """
-Stage 2 - Trend Identification (core_discovery.py)
+Stage 2 — Trend Identification (core_discovery.py)
 
 Takes raw signals from collectors.py and outputs normalized trend objects
 ready for scoring.py (Stage 3).
@@ -15,14 +15,6 @@ Pipeline:
 
 # ---------------------------------------------------------------------------
 # INGREDIENT CATALOG
-# Every trend POP might care about. Each entry has:
-#   - name:                  canonical display name
-#   - aliases:               strings to match in signal text (case-insensitive)
-#   - category:              POP focus bucket
-#   - format:                product format (used by scoring for shelf-life check)
-#   - key_ingredients:       short list for POP-Fit matching in Stage 3
-#   - ingredients:           full list for FDA compliance check in Stage 3
-#   - primary_source_country used for trade risk check in Stage 3
 # ---------------------------------------------------------------------------
 
 INGREDIENT_CATALOG = [
@@ -208,191 +200,177 @@ INGREDIENT_CATALOG = [
 
 
 # ---------------------------------------------------------------------------
-# STEP 1 — Extract ingredient mentions from signal text
+# TREND NORMALIZER
 # ---------------------------------------------------------------------------
 
-def extract_mentions(signals):
+class TrendNormalizer:
     """
-    Scan every signal's term + snippet for catalog aliases.
-    Returns dict: { canonical_name -> [signals that mention it] }
+    Stage 2 normalizer. Accepts an ingredient catalog on construction so it
+    can be initialized with a custom catalog in tests.
     """
-    mentions = {item["name"]: [] for item in INGREDIENT_CATALOG}
 
-    for signal in signals:
-        text = (signal.get("term", "") + " " + signal.get("snippet", "")).lower()
-        for item in INGREDIENT_CATALOG:
-            for alias in item["aliases"]:
-                if alias.lower() in text:
-                    mentions[item["name"]].append(signal)
-                    break  # one match per ingredient per signal — no double-counting
+    def __init__(self, catalog=None):
+        self.catalog = catalog if catalog is not None else INGREDIENT_CATALOG
 
-    return mentions
+    # -- Step 1: match signals to catalog entries --
 
+    def extract_mentions(self, signals: list[dict]) -> dict:
+        """
+        Scan every signal's term + snippet for catalog aliases.
+        Returns dict: { canonical_name -> [signals that mention it] }
+        """
+        mentions = {item["name"]: [] for item in self.catalog}
 
-# ---------------------------------------------------------------------------
-# STEP 2 — Compute growth rate from matched signals
-# ---------------------------------------------------------------------------
+        for signal in signals:
+            text = (signal.get("term", "") + " " + signal.get("snippet", "")).lower()
+            for item in self.catalog:
+                for alias in item["aliases"]:
+                    if alias.lower() in text:
+                        mentions[item["name"]].append(signal)
+                        break  # one match per ingredient per signal
 
-def compute_growth_rate(signals):
-    """
-    Growth rate from interest_over_time signals only (the seed term's real trajectory).
-    Falls back to Amazon rank-jump if no GT interest_over_time data.
-    Rising-related queries are intentionally excluded here — they inflate the number
-    and are accounted for separately via rising_query_count.
-    """
-    iot = [s["signal_value"] for s in signals
-           if s["source"] == "google_trends"
-           and s["metadata"].get("query_type") == "interest_over_time"]
-    amazon = [s["signal_value"] for s in signals
-              if s["source"] == "amazon_movers" and s["signal_value"] > 0]
+        return mentions
 
-    if iot:
-        return max(iot)  # best seed-term growth across batches
-    if amazon:
-        # Rough conversion: rank jump of 50 positions ≈ 100% demand growth; cap at 200
-        return min(max(amazon) * 2, 200)
-    return 0
+    # -- Step 2: growth rate --
 
+    def compute_growth_rate(self, signals: list[dict]) -> int:
+        """
+        Growth rate from interest_over_time signals only.
+        Falls back to Amazon rank-jump if no GT IOT data.
+        Rising-related queries are excluded — accounted for separately.
+        """
+        iot    = [s["signal_value"] for s in signals
+                  if s["source"] == "google_trends"
+                  and s["metadata"].get("query_type") == "interest_over_time"]
+        amazon = [s["signal_value"] for s in signals
+                  if s["source"] == "amazon_movers" and s["signal_value"] > 0]
 
-# ---------------------------------------------------------------------------
-# STEP 3 — Compute recency score (0–1)
-# ---------------------------------------------------------------------------
+        if iot:
+            return max(iot)
+        if amazon:
+            return min(max(amazon) * 2, 200)
+        return 0
 
-def compute_recency_score(signals):
-    """
-    Uses interest_over_time signals only — these measure whether the seed term
-    itself is still climbing. Rising-related queries tell us about sub-term
-    velocity but not whether the window is still open on the parent trend.
+    # -- Step 3: recency score --
 
-    Mapping: +100% growth -> ~0.67, +200% -> 1.0, flat -> 0.5, -100% -> 0.0
-    """
-    iot = [s for s in signals
-           if s["source"] == "google_trends"
-           and s["metadata"].get("query_type") == "interest_over_time"]
-    if not iot:
-        return 0.5  # no GT data — neutral
+    def compute_recency_score(self, signals: list[dict]) -> float:
+        """
+        Uses interest_over_time signals only.
+        Mapping: +200% -> 1.0, flat -> 0.5, -100% -> 0.0
+        """
+        iot = [s for s in signals
+               if s["source"] == "google_trends"
+               and s["metadata"].get("query_type") == "interest_over_time"]
+        if not iot:
+            return 0.5
 
-    avg_growth = sum(s["signal_value"] for s in iot) / len(iot)
-    score = (avg_growth + 100) / 300
-    return max(0.0, min(1.0, round(score, 2)))
+        avg_growth = sum(s["signal_value"] for s in iot) / len(iot)
+        score = (avg_growth + 100) / 300
+        return max(0.0, min(1.0, round(score, 2)))
 
+    # -- Step 3b: rising query count --
 
-# ---------------------------------------------------------------------------
-# STEP 3b — Count breakout rising-related queries
-# ---------------------------------------------------------------------------
+    def count_rising_queries(self, signals: list[dict]) -> int:
+        """Number of rising-related Google Trends queries for this trend."""
+        return sum(
+            1 for s in signals
+            if s["source"] == "google_trends"
+            and s["metadata"].get("query_type") == "rising_related"
+        )
 
-def count_rising_queries(signals):
-    """
-    Number of rising-related Google Trends queries for this trend.
-    Each one is a sub-term (e.g. 'elderberry gummies') with accelerating search volume.
-    High count = trend is spawning sub-categories = still early.
-    """
-    return sum(
-        1 for s in signals
-        if s["source"] == "google_trends"
-        and s["metadata"].get("query_type") == "rising_related"
-    )
+    # -- Step 3c: average absolute GT interest --
 
-
-# ---------------------------------------------------------------------------
-# STEP 3c — Average absolute GT interest (0–100 scale)
-# ---------------------------------------------------------------------------
-
-def compute_avg_interest(signals):
-    """
-    Average absolute search interest from Google Trends interest_over_time (0–100).
-    Distinguishes a declining category leader (high interest, negative growth)
-    from a true niche (low interest, positive growth).
-    Returns None if no GT interest_over_time data.
-    """
-    values = [
-        s["metadata"]["avg_interest"]
-        for s in signals
-        if s["source"] == "google_trends"
-        and s["metadata"].get("query_type") == "interest_over_time"
-        and "avg_interest" in s["metadata"]
-    ]
-    if not values:
-        return None
-    return round(sum(values) / len(values), 1)
-
-
-# ---------------------------------------------------------------------------
-# STEP 4 — Estimate competition density (0–1)
-# ---------------------------------------------------------------------------
-
-def compute_competition_density(signals):
-    """
-    How crowded is the shelf?
-    Based on Amazon Movers rank: low rank number = product already dominant = crowded.
-    No Amazon signal = assume moderate competition (0.5).
-    """
-    amazon = [s for s in signals if s["source"] == "amazon_movers"]
-    if not amazon:
-        return 0.5
-
-    ranks = [s["metadata"].get("rank", 15) for s in amazon]
-    avg_rank = sum(ranks) / len(ranks)
-    # We scrape top 20 per category — normalize against that range
-    # Rank 1 -> ~0.95 (saturated), rank 20 -> ~0.05 (wide open)
-    density = 1.0 - ((avg_rank - 1) / 19)
-    return max(0.05, min(0.95, round(density, 2)))
-
-
-# ---------------------------------------------------------------------------
-# STEP 5 — Normalize: combine everything into one trend object per ingredient
-# ---------------------------------------------------------------------------
-
-def normalize(signals):
-    """
-    Main Stage 2 function.
-    Input:  raw signal list from collectors.collect_all()
-    Output: sorted list of normalized trend objects for scoring.py
-    """
-    mentions = extract_mentions(signals)
-
-    trends = []
-    for item in INGREDIENT_CATALOG:
-        matched = mentions[item["name"]]
-        if not matched:
-            continue  # no signals found for this ingredient — skip
-
-        sources     = list({s["source"] for s in matched})
-        source_count = len(sources)
-        evidence    = [
-            {
-                "source":  s["source"],
-                "snippet": s["snippet"],
-                "value":   s["signal_value"],
-            }
-            for s in sorted(matched, key=lambda x: x["signal_value"], reverse=True)[:5]
+    def compute_avg_interest(self, signals: list[dict]):
+        """
+        Average absolute search interest (0–100) from GT interest_over_time.
+        Returns None if no GT IOT data.
+        """
+        values = [
+            s["metadata"]["avg_interest"]
+            for s in signals
+            if s["source"] == "google_trends"
+            and s["metadata"].get("query_type") == "interest_over_time"
+            and "avg_interest" in s["metadata"]
         ]
+        return round(sum(values) / len(values), 1) if values else None
 
-        trend = {
-            # Identity
-            "name":                   item["name"],
-            "category":               item["category"],
-            "format":                 item["format"],
-            "key_ingredients":        item["key_ingredients"],
-            "ingredients":            item["ingredients"],
-            "primary_source_country": item["primary_source_country"],
-            # Computed signals
-            "growth_rate_pct":        compute_growth_rate(matched),
-            "recency_score":          compute_recency_score(matched),
-            "competition_density":    compute_competition_density(matched),
-            "avg_gt_interest":        compute_avg_interest(matched),   # absolute GT interest 0–100
-            "rising_query_count":     count_rising_queries(matched),   # breakout sub-term count
-            # Evidence
-            "evidence":               evidence,
-            "sources":                sources,
-            "source_count":           source_count,
-            "signal_count":           len(matched),
-        }
-        trends.append(trend)
+    # -- Step 4: competition density --
 
-    # Sort: more sources first, then higher growth
-    trends.sort(key=lambda t: (t["source_count"], t["growth_rate_pct"]), reverse=True)
-    return trends
+    def compute_competition_density(self, signals: list[dict]) -> float:
+        """
+        Competition density from Amazon rank (0 = wide open, 1 = saturated).
+        Defaults to 0.5 when no Amazon data.
+        """
+        amazon = [s for s in signals if s["source"] == "amazon_movers"]
+        if not amazon:
+            return 0.5
+
+        ranks    = [s["metadata"].get("rank", 15) for s in amazon]
+        avg_rank = sum(ranks) / len(ranks)
+        density  = 1.0 - ((avg_rank - 1) / 19)
+        return max(0.05, min(0.95, round(density, 2)))
+
+    # -- Step 5: assemble trend objects --
+
+    def normalize(self, signals: list[dict]) -> list[dict]:
+        """
+        Main Stage 2 method.
+        Input:  raw signal list from collectors.collect_all()
+        Output: sorted list of normalized trend objects for scoring.py
+        """
+        mentions = self.extract_mentions(signals)
+        trends   = []
+
+        for item in self.catalog:
+            matched = mentions[item["name"]]
+            if not matched:
+                continue
+
+            sources      = list({s["source"] for s in matched})
+            source_count = len(sources)
+            evidence     = [
+                {"source": s["source"], "snippet": s["snippet"], "value": s["signal_value"]}
+                for s in sorted(matched, key=lambda x: x["signal_value"], reverse=True)[:5]
+            ]
+
+            trends.append({
+                # Identity
+                "name":                   item["name"],
+                "category":               item["category"],
+                "format":                 item["format"],
+                "key_ingredients":        item["key_ingredients"],
+                "ingredients":            item["ingredients"],
+                "primary_source_country": item["primary_source_country"],
+                # Computed signals
+                "growth_rate_pct":        self.compute_growth_rate(matched),
+                "recency_score":          self.compute_recency_score(matched),
+                "competition_density":    self.compute_competition_density(matched),
+                "avg_gt_interest":        self.compute_avg_interest(matched),
+                "rising_query_count":     self.count_rising_queries(matched),
+                # Evidence
+                "evidence":               evidence,
+                "sources":                sources,
+                "source_count":           source_count,
+                "signal_count":           len(matched),
+            })
+
+        trends.sort(key=lambda t: (t["source_count"], t["growth_rate_pct"]), reverse=True)
+        return trends
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience functions — preserve public API for tests + scripts
+# ---------------------------------------------------------------------------
+
+_normalizer = TrendNormalizer()
+
+def extract_mentions(signals):           return _normalizer.extract_mentions(signals)
+def compute_growth_rate(signals):        return _normalizer.compute_growth_rate(signals)
+def compute_recency_score(signals):      return _normalizer.compute_recency_score(signals)
+def count_rising_queries(signals):       return _normalizer.count_rising_queries(signals)
+def compute_avg_interest(signals):       return _normalizer.compute_avg_interest(signals)
+def compute_competition_density(signals): return _normalizer.compute_competition_density(signals)
+def normalize(signals):                  return _normalizer.normalize(signals)
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +384,7 @@ if __name__ == "__main__":
     signals = collect_all()
 
     print(f"\nRunning Stage 2 normalization on {len(signals)} signals...\n")
-    trends = normalize(signals)
+    trends = TrendNormalizer().normalize(signals)
 
     SOURCE_ABBREV = {
         "google_trends": "GT",
@@ -420,7 +398,7 @@ if __name__ == "__main__":
     print(f"{'Trend':<28} {'Src':>8} {'Growth':>7} {'Recency':>8} {'Compete':>8} {'GT Int':>7} {'Rising':>7}")
     print("-" * 80)
     for t in trends:
-        src_str = ",".join(SOURCE_ABBREV.get(s, s) for s in sorted(t["sources"]))
+        src_str  = ",".join(SOURCE_ABBREV.get(s, s) for s in sorted(t["sources"]))
         interest = f"{t['avg_gt_interest']:.0f}" if t["avg_gt_interest"] is not None else "—"
         print(
             f"{t['name']:<28} {src_str:>8} "
