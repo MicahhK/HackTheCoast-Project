@@ -207,7 +207,7 @@ h1, h2, h3, h4 { font-family: var(--font-display); letter-spacing: -0.025em; fon
   inset: 0;
   background: rgba(20, 16, 10, 0.42);
   backdrop-filter: blur(2px);
-  z-index: 80;
+  z-index: 300;
   display: flex;
   justify-content: flex-start;
   animation: drawerFadeIn 0.18s ease-out;
