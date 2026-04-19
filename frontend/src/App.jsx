@@ -372,6 +372,14 @@ export default function App() {
   const [minScore,      setMinScore]      = useState(0)
   const [sortBy,        setSortBy]        = useState('composite_score')
   const [filtersInitialized, setFiltersInitialized] = useState(false)
+  const [filtersOpen,   setFiltersOpen]   = useState(false)
+
+  useEffect(() => {
+    if (!filtersOpen) return
+    const handler = e => { if (e.key === 'Escape') setFiltersOpen(false) }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [filtersOpen])
 
   const openModal  = useCallback(t  => setSelected(t),    [])
   const closeModal = useCallback(() => setSelected(null), [])
@@ -475,6 +483,16 @@ export default function App() {
               <button key={id} className={`topbar-tab${activeTab===id?' active':''}`} onClick={()=>setActiveTab(id)}>{label}</button>
             ))}
           </div>
+          {activeTab === 'trends' && (
+            <button
+              className="filters-btn"
+              onClick={() => setFiltersOpen(true)}
+              aria-label="Open filters"
+            >
+              <span className="filters-btn-icon" aria-hidden>☰</span>
+              Filters
+            </button>
+          )}
           <button className="refresh-btn" onClick={handleRefresh} disabled={refreshing||loading}>
             {refreshing ? 'Refreshing…' : 'Refresh Data'}
           </button>
@@ -541,28 +559,7 @@ export default function App() {
             )}
 
             {loading ? <div className="loading-state">Fetching live market signals…</div> : (
-              <div className="trends-layout">
-                <Sidebar
-                  allActions={allActions}
-                  allCategories={allCategories}
-                  allStages={allStages}
-                  filterActions={filterActions}
-                  setFilterActions={setFilterActions}
-                  filterCategories={filterCategories}
-                  setFilterCategories={setFilterCategories}
-                  filterStages={filterStages}
-                  setFilterStages={setFilterStages}
-                  compliantOnly={compliantOnly}
-                  setCompliantOnly={setCompliantOnly}
-                  minScore={minScore}
-                  setMinScore={setMinScore}
-                  sortBy={sortBy}
-                  setSortBy={setSortBy}
-                  onRefresh={handleRefresh}
-                  refreshing={refreshing}
-                />
-
-                <div className="trends-main">
+              <div className="trends-main">
                   <div className="search-panel">
                     <div>
                       <div className="search-panel-kicker">Analyst Filters</div>
@@ -658,7 +655,6 @@ export default function App() {
                       </div>
                     </section>
                   )}
-                </div>
               </div>
             )}
           </>
@@ -670,6 +666,40 @@ export default function App() {
 
       {/* Detail Modal */}
       {selected && <DetailModal trend={selected} onClose={closeModal} />}
+
+      {/* Filters Drawer */}
+      {filtersOpen && (
+        <div className="filter-drawer-overlay" onClick={() => setFiltersOpen(false)}>
+          <div className="filter-drawer" onClick={e => e.stopPropagation()}>
+            <button
+              className="filter-drawer-close"
+              onClick={() => setFiltersOpen(false)}
+              aria-label="Close filters"
+            >
+              ✕
+            </button>
+            <Sidebar
+              allActions={allActions}
+              allCategories={allCategories}
+              allStages={allStages}
+              filterActions={filterActions}
+              setFilterActions={setFilterActions}
+              filterCategories={filterCategories}
+              setFilterCategories={setFilterCategories}
+              filterStages={filterStages}
+              setFilterStages={setFilterStages}
+              compliantOnly={compliantOnly}
+              setCompliantOnly={setCompliantOnly}
+              minScore={minScore}
+              setMinScore={setMinScore}
+              sortBy={sortBy}
+              setSortBy={setSortBy}
+              onRefresh={handleRefresh}
+              refreshing={refreshing}
+            />
+          </div>
+        </div>
+      )}
     </>
   )
 }
