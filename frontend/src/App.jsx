@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import BuyerExport from './components/BuyerExport'
 import MethodTab from './components/MethodTab'
+import Sidebar from './components/Sidebar'
 
 /* ── Evidence parser: turns raw pipeline strings into plain English ── */
 function formatEvidence(raw) {
@@ -285,7 +286,7 @@ function FeaturedCard({ trend: t, onClick }) {
       <div className="featured-name">{t.name}</div>
       <div className="featured-sub">
         <span className="sub-text">{t.category}</span>
-        {t.market_stage && <><span className="sub-dot">·</span><span className="sub-text">{t.market_stage}</span></>}
+        {t.market_stage && <span className="sub-text">{t.market_stage}</span>}
       </div>
       <GrowthTag value={t.growth_rate_pct} />
       <span className="card-hint">Click for details →</span>
@@ -364,6 +365,13 @@ export default function App() {
   const [error,         setError]         = useState(null)
   const [compliantOnly, setCompliantOnly] = useState(false)
   const [selected,      setSelected]      = useState(null)
+  const [searchQuery,   setSearchQuery]   = useState('')
+  const [filterActions, setFilterActions] = useState([])
+  const [filterCategories, setFilterCategories] = useState([])
+  const [filterStages, setFilterStages] = useState([])
+  const [minScore,      setMinScore]      = useState(0)
+  const [sortBy,        setSortBy]        = useState('composite_score')
+  const [filtersInitialized, setFiltersInitialized] = useState(false)
 
   const openModal  = useCallback(t  => setSelected(t),    [])
   const closeModal = useCallback(() => setSelected(null), [])
@@ -386,9 +394,65 @@ export default function App() {
     finally     { setRefreshing(false) }
   }
 
-  const filtered   = useMemo(() =>
-    compliantOnly ? trends.filter(t => t.compliance_ok !== false) : trends
-  , [trends, compliantOnly])
+  const allActions = useMemo(
+    () => [...new Set(trends.map(t => t.action).filter(Boolean))],
+    [trends],
+  )
+  const allCategories = useMemo(
+    () => [...new Set(trends.map(t => t.category).filter(Boolean))].sort(),
+    [trends],
+  )
+  const allStages = useMemo(
+    () => [...new Set(trends.map(t => t.market_stage).filter(Boolean))],
+    [trends],
+  )
+
+  useEffect(() => {
+    if (!filtersInitialized && trends.length > 0) {
+      setFilterActions(allActions)
+      setFilterCategories(allCategories)
+      setFilterStages(allStages)
+      setFiltersInitialized(true)
+    }
+  }, [filtersInitialized, trends, allActions, allCategories, allStages])
+
+  const filtered = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase()
+    const searched = trends.filter((t) => {
+      if (compliantOnly && t.compliance_ok === false) return false
+      if (filterActions.length > 0 && !filterActions.includes(t.action)) return false
+      if (filterCategories.length > 0 && !filterCategories.includes(t.category)) return false
+      if (filterStages.length > 0 && !filterStages.includes(t.market_stage)) return false
+      if ((t.composite_score ?? 0) < minScore) return false
+      if (!query) return true
+
+      const haystack = [
+        t.name,
+        t.category,
+        t.format,
+        t.primary_source_country,
+        t.action,
+        t.market_stage,
+        t.top_evidence,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+
+      return haystack.includes(query)
+    })
+
+    return [...searched].sort((a, b) => (b[sortBy] ?? 0) - (a[sortBy] ?? 0))
+  }, [
+    trends,
+    compliantOnly,
+    filterActions,
+    filterCategories,
+    filterStages,
+    minScore,
+    searchQuery,
+    sortBy,
+  ])
 
   const featured   = useMemo(() => filtered.filter(t => t.action === 'BOTH')       .sort((a,b) => b.composite_score - a.composite_score), [filtered])
   const distribute = useMemo(() => filtered.filter(t => t.action === 'DISTRIBUTE') .sort((a,b) => b.composite_score - a.composite_score), [filtered])
@@ -411,9 +475,6 @@ export default function App() {
               <button key={id} className={`topbar-tab${activeTab===id?' active':''}`} onClick={()=>setActiveTab(id)}>{label}</button>
             ))}
           </div>
-          <button className={`toggle-pill${compliantOnly?' active':''}`} onClick={()=>setCompliantOnly(v=>!v)}>
-            {compliantOnly ? '✓ ' : ''}Compliant only
-          </button>
           <button className="refresh-btn" onClick={handleRefresh} disabled={refreshing||loading}>
             {refreshing ? 'Refreshing…' : 'Refresh Data'}
           </button>
@@ -480,84 +541,125 @@ export default function App() {
             )}
 
             {loading ? <div className="loading-state">Fetching live market signals…</div> : (
-              <>
-                {/* 01 Best Opportunities */}
-                {featured.length > 0 && (
-                  <section className="section" id="sec-best">
-                    <div className="section-header">
-                      <span className="section-ordinal">01</span>
-                      <h2 className="section-title">Best Opportunities</h2>
-                      <span className="section-count-badge">{featured.length} trends</span>
+              <div className="trends-layout">
+                <Sidebar
+                  allActions={allActions}
+                  allCategories={allCategories}
+                  allStages={allStages}
+                  filterActions={filterActions}
+                  setFilterActions={setFilterActions}
+                  filterCategories={filterCategories}
+                  setFilterCategories={setFilterCategories}
+                  filterStages={filterStages}
+                  setFilterStages={setFilterStages}
+                  compliantOnly={compliantOnly}
+                  setCompliantOnly={setCompliantOnly}
+                  minScore={minScore}
+                  setMinScore={setMinScore}
+                  sortBy={sortBy}
+                  setSortBy={setSortBy}
+                  onRefresh={handleRefresh}
+                  refreshing={refreshing}
+                />
+
+                <div className="trends-main">
+                  <div className="search-panel">
+                    <div>
+                      <div className="search-panel-kicker">Analyst Filters</div>
+                      <div className="search-panel-title">Search and narrow the opportunity set.</div>
                     </div>
-                    <p className="section-desc">These are the strongest trends right now. POP could source them and also turn them into its own product.</p>
-                    <Carousel
-                      items={featured}
-                      renderItem={(t) => <FeaturedCard trend={t} onClick={() => openModal(t)} />}
-                    />
-                  </section>
-                )}
-
-                {/* 02 Single-action — only render if at least one side has items */}
-                {(distribute.length > 0 || develop.length > 0) && (
-                  <section className="section" id="sec-single">
-                    <div className="section-header">
-                      <span className="section-ordinal">02</span>
-                      <h2 className="section-title">Single-Action Trends</h2>
+                    <div className="search-wrap">
+                      <input
+                        className="search-input"
+                        type="search"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Search by trend, category, format, country, or action"
+                      />
                     </div>
-                    <p className="section-desc">These trends point to one clear move: either bring in an outside product or build a new POP one.</p>
+                  </div>
 
-                    {/* Grid: two cols when both have data, one col otherwise */}
-                    <div className={distribute.length > 0 && develop.length > 0 ? 'split-section' : undefined}>
+                  {filtered.length === 0 && (
+                    <div className="empty-filter-state">
+                      No trends match the current search and filter settings.
+                    </div>
+                  )}
 
-                      {distribute.length > 0 && (
-                        <div>
-                          <div className="col-head col-distribute">
-                            <span className="col-head-label">Source a Product</span>
-                            <span className="col-head-count">{distribute.length} trends</span>
+                  {/* 01 Best Opportunities */}
+                  {featured.length > 0 && (
+                    <section className="section" id="sec-best">
+                      <div className="section-header">
+                        <span className="section-ordinal">01</span>
+                        <h2 className="section-title">Best Opportunities</h2>
+                        <span className="section-count-badge">{featured.length} trends</span>
+                      </div>
+                      <p className="section-desc">These are the strongest trends right now. POP could source them and also turn them into its own product.</p>
+                      <Carousel
+                        items={featured}
+                        renderItem={(t) => <FeaturedCard trend={t} onClick={() => openModal(t)} />}
+                      />
+                    </section>
+                  )}
+
+                  {/* 02 Single-action — only render if at least one side has items */}
+                  {(distribute.length > 0 || develop.length > 0) && (
+                    <section className="section" id="sec-single">
+                      <div className="section-header">
+                        <span className="section-ordinal">02</span>
+                        <h2 className="section-title">Single-Action Trends</h2>
+                      </div>
+                      <p className="section-desc">These trends point to one clear move: either bring in an outside product or build a new POP one.</p>
+
+                      <div className={distribute.length > 0 && develop.length > 0 ? 'split-section' : undefined}>
+                        {distribute.length > 0 && (
+                          <div>
+                            <div className="col-head col-distribute">
+                              <span className="col-head-label">Source a Product</span>
+                              <span className="col-head-count">{distribute.length} trends</span>
+                            </div>
+                            <p className="section-desc" style={{marginBottom:'1rem'}}>
+                              Find an existing product that POP can start selling through its distribution network.
+                            </p>
+                            <div className="action-cards">
+                              {distribute.map((t,i) => <ActionCard key={t.name} trend={t} onClick={()=>openModal(t)} style={{animationDelay:`${0.12+i*0.08}s`}} />)}
+                            </div>
                           </div>
-                          <p className="section-desc" style={{marginBottom:'1rem'}}>
-                            Find an existing product that POP can start selling through its distribution network.
-                          </p>
-                          <div className="action-cards">
-                            {distribute.map((t,i) => <ActionCard key={t.name} trend={t} onClick={()=>openModal(t)} style={{animationDelay:`${0.12+i*0.08}s`}} />)}
-                          </div>
-                        </div>
-                      )}
+                        )}
 
-                      {develop.length > 0 && (
-                        <div>
-                          <div className="col-head col-develop">
-                            <span className="col-head-label">Develop a Product</span>
-                            <span className="col-head-count">{develop.length} trends</span>
+                        {develop.length > 0 && (
+                          <div>
+                            <div className="col-head col-develop">
+                              <span className="col-head-label">Develop a Product</span>
+                              <span className="col-head-count">{develop.length} trends</span>
+                            </div>
+                            <p className="section-desc" style={{marginBottom:'1rem'}}>
+                              Create a new POP product by extending lines the company already knows well.
+                            </p>
+                            <div className="action-cards">
+                              {develop.map((t,i) => <ActionCard key={t.name} trend={t} onClick={()=>openModal(t)} style={{animationDelay:`${0.12+i*0.08}s`}} />)}
+                            </div>
                           </div>
-                          <p className="section-desc" style={{marginBottom:'1rem'}}>
-                            Create a new POP product by extending lines the company already knows well.
-                          </p>
-                          <div className="action-cards">
-                            {develop.map((t,i) => <ActionCard key={t.name} trend={t} onClick={()=>openModal(t)} style={{animationDelay:`${0.12+i*0.08}s`}} />)}
-                          </div>
-                        </div>
-                      )}
+                        )}
+                      </div>
+                    </section>
+                  )}
 
-                    </div>
-                  </section>
-                )}
-
-                {/* 03 Watch List */}
-                {watchList.length > 0 && (
-                  <section className="section" id="sec-watch">
-                    <div className="section-header">
-                      <span className="section-ordinal">03</span>
-                      <h2 className="section-title">Watchlist</h2>
-                      <span className="section-count-badge">{watchList.length} trends</span>
-                    </div>
-                    <p className="section-desc">Signal too weak, market too crowded, or doesn't fit POP's lines right now. Revisit next quarter.</p>
-                    <div className="watch-grid">
-                      {watchList.map((t,i) => <WatchCard key={t.name} trend={t} onClick={()=>openModal(t)} style={{animationDelay:`${0.1+i*0.05}s`}} />)}
-                    </div>
-                  </section>
-                )}
-              </>
+                  {/* 03 Watch List */}
+                  {watchList.length > 0 && (
+                    <section className="section" id="sec-watch">
+                      <div className="section-header">
+                        <span className="section-ordinal">03</span>
+                        <h2 className="section-title">Watchlist</h2>
+                        <span className="section-count-badge">{watchList.length} trends</span>
+                      </div>
+                      <p className="section-desc">Signal too weak, market too crowded, or doesn't fit POP's lines right now. Revisit next quarter.</p>
+                      <div className="watch-grid">
+                        {watchList.map((t,i) => <WatchCard key={t.name} trend={t} onClick={()=>openModal(t)} style={{animationDelay:`${0.1+i*0.05}s`}} />)}
+                      </div>
+                    </section>
+                  )}
+                </div>
+              </div>
             )}
           </>
         )}
