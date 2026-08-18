@@ -27,7 +27,7 @@ python main.py
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install streamlit pandas pytrends praw feedparser requests beautifulsoup4
+pip install -r requirements.txt
 pip install "urllib3<2.0.0"   # required — pytrends breaks with urllib3 >= 2.0
 ```
 
@@ -37,10 +37,51 @@ pip install "urllib3<2.0.0"   # required — pytrends breaks with urllib3 >= 2.0
 
 ```
 Stage 1                         Stage 2                          Stage 3
-pipeline/collectors.py  →  pipeline/discovery.py  →  pipeline/scoring.py  →  app.py (UI)
-                                       ↑
-                                 data/pop_data.py
+pipeline/collectors.py  →  pipeline/discovery.py  →  pipeline/scoring.py  →  UI
+                                       ↑                                     ├─ app.py (Streamlit)
+                                 data/pop_data.py                            └─ api.py (FastAPI) → frontend/ (React + Vite)
 ```
+
+---
+
+## Running the UI
+
+There are two ways to view the scored trends. Both read the same
+pipeline output (`artifacts/exports/pop_trend_report.csv`), so pick
+whichever fits what you're doing.
+
+### Option A — Streamlit (`app.py`)
+
+Single process, no build step:
+
+```bash
+source venv/bin/activate
+streamlit run app.py
+```
+
+Opens at `http://localhost:8501`.
+
+### Option B — React frontend (`frontend/`) + FastAPI backend (`api.py`)
+
+Two processes, run in separate terminals:
+
+```bash
+# Terminal 1 — API backend (serves /api/trends and /api/refresh on :8000)
+source venv/bin/activate
+uvicorn api:app --reload --port 8000
+
+# Terminal 2 — frontend dev server (proxies /api/* to :8000, see frontend/vite.config.js)
+cd frontend
+npm install   # first time only
+npm run dev
+```
+
+Opens at `http://localhost:5173`. On startup, `api.py` serves the
+existing `artifacts/exports/pop_trend_report.csv` if present (fast);
+otherwise it runs the full Stage 1–3 pipeline once to generate it.
+The frontend's **Refresh Data** button hits `POST /api/refresh`, which
+re-runs the pipeline live (Google Trends, RSS, Amazon, FDA) and
+re-exports the CSV.
 
 ---
 
@@ -180,15 +221,18 @@ This pattern means: the broad trend is maturing, but specific variants and use c
 ```
 Trend                   Score  Stage     Action       Compliance
 ────────────────────────────────────────────────────────────────────
-Matcha Mushroom Latte    41.0  growing   🌟 BOTH       ✅  Matches POP Herbal Teas + Organic Teas
-Mushroom Coffee          40.5  growing   🌟 BOTH       ✅  "mushroom coffee benefits" rising +3250%
-Turmeric Ginger Latte    40.3  growing   🌟 BOTH       ✅  Direct adjacency to Ginger Chews line
-Ginger Shot              40.0  peaking   🔨 DEVELOP    ✅  4 rising sub-queries despite -6% base
-Lion's Mane Mushroom     39.5  peaking   🔨 DEVELOP    ✅  "lions mane supplement" rising +400%
-Manuka Honey             38.8  growing   🌟 BOTH       ✅  New Zealand sourcing, low risk
-Tempeh                    0.0  growing   — PASS       ❌  9mo shelf life < 12mo minimum
+Elderberry               44.2  growing   🌟 BOTH       ✅  Shelf life 18mo | FDA clear | Trade risk 0.00
+Lion's Mane Mushroom     42.4  growing   🌟 BOTH       ✅  Shelf life 36mo | FDA clear | Trade risk 0.00
+Mushroom Coffee          40.9  peaking   🌟 BOTH       ✅  Shelf life 36mo | FDA clear | Trade risk 0.00
+Turmeric Ginger Latte    39.6  peaking   🌟 BOTH       ✅  Shelf life 36mo | FDA clear | Trade risk 0.35
+Ginger Shot              39.0  peaking   🌟 BOTH       ✅  Shelf life 18mo | FDA clear | Trade risk 0.00
+Manuka Honey             36.9  peaking   🌟 BOTH       ✅  Shelf life 18mo | FDA clear | Trade risk 0.20
+Tempeh                    0.0  peaking   — PASS       ❌  9mo shelf life < 12mo minimum
 Reishi Mushroom Tea       0.0  peaking   — PASS       ❌  China trade risk 0.85, no exemption
 ```
+
+Regenerate this anytime with `python main.py`, or via the frontend's
+**Refresh Data** button (see [Running the UI](#running-the-ui)).
 
 ---
 
