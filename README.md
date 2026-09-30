@@ -1,256 +1,72 @@
-# HackTheCoast 2026 — POP Trend Intelligence Tool
-Product Discovery & Trend Intelligence for Prince of Peace Enterprises
+# POP Trend Intelligence
 
----
+A trend-discovery tool built for **Prince of Peace Enterprises (POP)** at Hack the Coast 2026.
 
-## Quick Start
+POP's buyers scout new products by hand, and they've missed trends like ube because by the time they found a compliant supplier, the market window had closed. This tool pulls signals from public sources, keeps only products that pass POP's sourcing rules, and ranks what's left. Each trend gets one of four actions:
+
+- **DISTRIBUTE**: an existing product POP could add to its portfolio
+- **DEVELOP**: a trend close to POP's ginger, ginseng, or tea lines that could become a POP-branded product
+- **BOTH**: meets both criteria (the strongest opportunities)
+- **PASS**: weak fit, blocked by a sourcing rule, or too late
+
+## How It Works
+
+```
+collect signals  →  normalize into trends  →  score & filter  →  CSV + UI
+(collectors.py)     (discovery.py)            (scoring.py)
+```
+
+1. **Collect** signals from Google Trends, trade-publication RSS feeds, Amazon Movers & Shakers, FDA GRAS notices, and Reddit (optional).
+2. **Normalize** the signals: match them against a catalog of ingredients, merge duplicates, and count how many sources mention each trend.
+3. **Score** each trend: `0.55 × Signal Strength + 0.45 × POP-Fit`. Signal Strength combines growth, recency, how many sources agree, and how crowded the market already is. POP-Fit measures overlap with POP's existing product lines.
+4. **Filter** against POP's hard rules: at least 12 months shelf life, no banned FDA ingredients, and a country trade risk of 0.60 or less. A trend that fails gets a score of 0 but stays in the list, so buyers can see why it was rejected.
+
+Results are exported to `artifacts/exports/pop_trend_report.csv`, which opens in Excel. More detail on each stage is in [`docs/`](docs/).
+
+## Setup
 
 ```bash
-# Activate the virtual environment (all dependencies pre-installed)
-source venv/bin/activate        # macOS/Linux
-venv\Scripts\activate           # Windows
+python3 -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+pip install "urllib3<2.0.0"       # required: pytrends breaks on urllib3 2.x
+```
 
-# Verify all sources are working
-python scripts/debug_collectors.py
+**Optional:** to include Reddit, set credentials from [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) (create a "script" app):
 
-# Run Stage 1 (collect raw signals)
-python -m pop_trend_intelligence.pipeline.collectors
+```bash
+export REDDIT_CLIENT_ID=your_id
+export REDDIT_CLIENT_SECRET=your_secret
+```
 
-# Run Stage 1 + Stage 2 (collect + normalize into trends)
-python -m pop_trend_intelligence.pipeline.discovery
+## Running
 
-# Run the full pipeline and export a CSV
+**Run the pipeline** and export the CSV:
+
+```bash
 python main.py
 ```
 
-**First time setup** (if venv doesn't exist):
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-pip install "urllib3<2.0.0"   # required — pytrends breaks with urllib3 >= 2.0
-```
-
----
-
-## Pipeline Overview
-
-```
-Stage 1                         Stage 2                          Stage 3
-pipeline/collectors.py  →  pipeline/discovery.py  →  pipeline/scoring.py  →  UI
-                                       ↑                                     ├─ app.py (Streamlit)
-                                 data/pop_data.py                            └─ api.py (FastAPI) → frontend/ (React + Vite)
-```
-
----
-
-## Running the UI
-
-There are two ways to view the scored trends. Both read the same
-pipeline output (`artifacts/exports/pop_trend_report.csv`), so pick
-whichever fits what you're doing.
-
-### Option A — Streamlit (`app.py`)
-
-Single process, no build step:
+**Streamlit UI** at http://localhost:8501:
 
 ```bash
-source venv/bin/activate
 streamlit run app.py
 ```
 
-Opens at `http://localhost:8501`.
-
-### Option B — React frontend (`frontend/`) + FastAPI backend (`api.py`)
-
-Two processes, run in separate terminals:
+**React UI + API** at http://localhost:5173 (two terminals):
 
 ```bash
-# Terminal 1 — API backend (serves /api/trends and /api/refresh on :8000)
-source venv/bin/activate
+# Terminal 1: API on :8000
 uvicorn api:app --reload --port 8000
 
-# Terminal 2 — frontend dev server (proxies /api/* to :8000, see frontend/vite.config.js)
-cd frontend
-npm install   # first time only
-npm run dev
+# Terminal 2: frontend
+cd frontend && npm install && npm run dev
 ```
 
-Opens at `http://localhost:5173`. On startup, `api.py` serves the
-existing `artifacts/exports/pop_trend_report.csv` if present (fast);
-otherwise it runs the full Stage 1–3 pipeline once to generate it.
-The frontend's **Refresh Data** button hits `POST /api/refresh`, which
-re-runs the pipeline live (Google Trends, RSS, Amazon, FDA) and
-re-exports the CSV.
+Both UIs read the exported CSV. If it doesn't exist yet, the API runs the pipeline once on startup. The **Refresh Data** button in the React UI runs the pipeline again with live data.
 
----
+## Notes
 
-## Stage 1 — Data Collection (`pop_trend_intelligence/pipeline/collectors.py`)
-
-Pulls raw signals from five public sources. Each signal has the same schema:
-
-```python
-{
-    "source":       str,   # which collector produced this
-    "term":         str,   # ingredient or product name / raw title
-    "signal_value": int,   # what "strength" means per source (see below)
-    "snippet":      str,   # one human-readable evidence sentence
-    "timestamp":    str,   # ISO 8601
-    "metadata":     dict,  # source-specific extras
-}
-```
-
-### Sources and Signal Values
-
-| Source | `signal_value` meaning | Auth needed? | Status |
-|---|---|---|---|
-| **Google Trends** | % growth (last 4 weeks vs prior 12) | None | ✅ Working |
-| **Reddit** | Post upvote score | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` env vars | ⚠️ Needs creds |
-| **RSS / Trade pubs** | 1 (presence — frequency counted in Stage 2) | None | ✅ Working |
-| **Amazon Movers & Shakers** | Rank positions jumped (999 = previously unranked) | None | ✅ Working |
-| **FDA GRAS Notices** | 1 (cleared = entering U.S. market) | None | ✅ Working |
-
-### RSS Feeds
-
-| Feed | Articles |
-|---|---|
-| Food Dive | ~10 |
-| New Hope Network | ~50 |
-| SPINS Insights | ~10 |
-
-### Setting Up Reddit (optional but recommended)
-
-1. Go to [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) → **create app** → select **script**
-2. Export credentials in your terminal session:
-   ```bash
-   export REDDIT_CLIENT_ID=your_id
-   export REDDIT_CLIENT_SECRET=your_secret
-   ```
-   On PowerShell:
-   ```powershell
-   $env:REDDIT_CLIENT_ID="your_id"
-   $env:REDDIT_CLIENT_SECRET="your_secret"
-   ```
-
----
-
-## How We Analyze the Data
-
-### Step 1 — Signal Normalization (Stage 2)
-
-`pop_trend_intelligence/pipeline/discovery.py` scans every signal's `term` and `snippet` against an ingredient catalog of ~20 trend candidates. Each catalog entry defines:
-
-- **Canonical name** (e.g., "Lion's Mane Mushroom")
-- **Aliases** to match in raw text (e.g., "lions mane", "hericium", "lion's mane coffee")
-- **Category** (functional food, asian specialty, adaptogen, etc.)
-- **Format** (instant powder, chewy candy, supplement, etc.) — used for shelf-life check
-- **Key ingredients** — used for POP-Fit scoring in Stage 3
-- **Primary source country** — used for trade-risk check in Stage 3
-
-A signal matches a trend if any alias appears in the signal's text. One signal can only match one trend entry (no double-counting).
-
-### Step 2 — Signal Aggregation
-
-For each matched trend, Stage 2 computes:
-
-| Metric | How it's calculated |
-|---|---|
-| **Growth rate** | Max Google Trends growth % across matched signals; or Amazon rank-jump × 2 if no GT data |
-| **Recency score (0–1)** | Maps average GT growth to a 0–1 window-open score: +200% → 1.0, flat → 0.5, declining → lower |
-| **Competition density (0–1)** | Based on Amazon rank: rank #1 ≈ 0.95 (saturated), rank #30 ≈ 0.05 (wide open). No Amazon data → 0.5 |
-| **Source count** | How many distinct sources (GT, Reddit, RSS, Amazon, FDA) flagged this trend — corroboration weight |
-
-### Step 3 — Composite Scoring (Stage 3)
-
-**Signal Strength Score** (0–100) — weighted from Stage 2 metrics:
-
-| Factor | Weight | Rationale |
-|---|---|---|
-| Growth Rate | 40% | Highest weight because POP's core problem is missing the window — velocity is the most direct proxy for "is the window still open" |
-| Recency | 35% | A fast-growing trend that started 3 years ago is less actionable than one that started 3 months ago |
-| Cross-source corroboration | 15% | A signal appearing in Google Trends *and* Reddit *and* trade press is more likely real than a single-source spike. Academic research on information cascades supports corroboration as an early-trend amplifier |
-| Competition density (inverse) | 10% | Lowest weight because low competition alone isn't a reason to act — it just modifies how urgently to move |
-
-> **Note on weights:** These are custom-designed for POP's specific problem (early trend detection for a CPG distributor), not a published industry formula. SPINS, Nielsen, and Circana use similar multi-factor velocity models but their exact weights are proprietary. Google Trends defines its own "breakout" threshold at >5000% growth — we use that as a calibration anchor for signal_value caps.
-
-**POP-Fit Score** (0–100) — keyword adjacency between trend ingredients and POP's 5 proprietary lines (Ginger Chews, Ginger Honey Crystals, American Ginseng, Herbal Teas, Organic Teas). **+30 points per matching line, capped at 100.**
-
-This is intentionally simple: deeper ingredient overlap with POP's existing supply chain = faster time-to-market = more actionable opportunity.
-
-**Composite Score** = `0.55 × Signal Strength + 0.45 × POP-Fit`
-
-The 55/45 split prioritizes market signal over fit — a red-hot trend with weak POP adjacency still scores higher than a perfect-fit ingredient with no market momentum.
-
-Compliance failures (banned FDA ingredients or trade risk > 0.60) **zero the composite score** but the trend stays visible so buyers know *why* it was rejected.
-
-### Step 4 — Action Classification
-
-| Action | When assigned |
-|---|---|
-| **DEVELOP** | POP-Fit ≥ 50 and adjacent ingredient/supply chain exists |
-| **DISTRIBUTE** | Category matches POP's distributed portfolio or competition density < 0.6 |
-| **BOTH** | Both criteria met — strongest opportunities |
-| **PASS** | Weak fit, compliance blocked, or trend window already closed |
-
-### Reading the Output
-
-A high-value trend has:
-- **High source count** — Google Trends + Reddit + RSS + Amazon all flagging it = real signal, not noise
-- **Positive growth rate** — trend window is still open
-- **High POP-Fit** — adjacent to POP's existing supply chains (faster time-to-market)
-- **Low competition density** — shelf isn't crowded yet
-- **No compliance flags** — FDA-clear ingredients, source country risk ≤ 0.60
-
-### POP's Asymmetric Advantage
-
-Products established in SE Asia but unknown in the U.S. show up in our data as:
-- Low competition density (nobody's there yet on Amazon)
-- Low Google Trends average interest (not mainstream)
-- But **positive growth** (curve is starting to climb)
-
-These are the highest-value DEVELOP candidates because POP already has authentic supply chain relationships that U.S. competitors don't.
-
-### The Negative Growth / Rising Queries Signal
-
-Some of the most actionable opportunities show **negative base growth but high rising query counts** — for example, Ginger Shot (-6% base growth, 4 rising sub-queries including "organic ginger shot" +130%) and Lion's Mane Mushroom (-5% base, rising queries like "lions mane supplement" +400%).
-
-This pattern means: the broad trend is maturing, but specific variants and use cases are still early. For POP — who already makes Ginger Chews and Ginger Honey Crystals — a premium organic ginger shot format is a natural DEVELOP extension into a sub-category that's just opening, with no new supply chain required. The base market is proven; the variant window is still wide open.
-
-### Live Output (April 2026)
-
-```
-Trend                   Score  Stage     Action       Compliance
-────────────────────────────────────────────────────────────────────
-Elderberry               44.2  growing   🌟 BOTH       ✅  Shelf life 18mo | FDA clear | Trade risk 0.00
-Lion's Mane Mushroom     42.4  growing   🌟 BOTH       ✅  Shelf life 36mo | FDA clear | Trade risk 0.00
-Mushroom Coffee          40.9  peaking   🌟 BOTH       ✅  Shelf life 36mo | FDA clear | Trade risk 0.00
-Turmeric Ginger Latte    39.6  peaking   🌟 BOTH       ✅  Shelf life 36mo | FDA clear | Trade risk 0.35
-Ginger Shot              39.0  peaking   🌟 BOTH       ✅  Shelf life 18mo | FDA clear | Trade risk 0.00
-Manuka Honey             36.9  peaking   🌟 BOTH       ✅  Shelf life 18mo | FDA clear | Trade risk 0.20
-Tempeh                    0.0  peaking   — PASS       ❌  9mo shelf life < 12mo minimum
-Reishi Mushroom Tea       0.0  peaking   — PASS       ❌  China trade risk 0.85, no exemption
-```
-
-Regenerate this anytime with `python main.py`, or via the frontend's
-**Refresh Data** button (see [Running the UI](#running-the-ui)).
-
----
-
-## Hard Constraints (Non-Negotiable)
-
-| Constraint | Rule |
-|---|---|
-| Shelf life | Minimum **12 months** — refrigerated/fresh products auto-disqualified |
-| FDA ingredients | No banned ingredients (CBD, Kratom, Ephedra, Delta-8, etc.) — watch-list items flagged but not blocked |
-| Country trade risk | Max score **0.60** — blocks China-only sourcing for new categories |
-
----
-
-## Google Trends Cache
-
-Google Trends is rate-limited. Results are cached for 24 hours in `artifacts/cache/gt_cache.json`.
-
-- Delete `artifacts/cache/gt_cache.json` to force a fresh fetch (triggers rate-limit delays of ~2s/batch)
-- Cache is automatically refreshed if older than 24 hours
-
----
+- Google Trends results are cached for 24 hours in `artifacts/cache/gt_cache.json`. Delete that file to force a fresh fetch.
+- Amazon scraping is best-effort. Amazon changes its page layout often, so this source can break without warning.
+- `scripts/debug_collectors.py` checks that each data source is reachable.
